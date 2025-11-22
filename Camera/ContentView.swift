@@ -144,6 +144,10 @@ struct ContentView: View {
 
     private var cameraInterface: some View {
         VStack {
+            Image(systemName: "globe")
+                .imageScale(.large)
+                .foregroundStyle(.tint)
+            Text("Hello, world!")
             CameraPreview(session: cameraModel.session)
                 .overlay(alignment: .bottom) {
                     captureControls
