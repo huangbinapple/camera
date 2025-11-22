@@ -51,11 +51,10 @@ final class CameraModel: NSObject, ObservableObject {
             self.session.beginConfiguration()
             self.session.sessionPreset = .photo
 
-            defer { self.session.commitConfiguration() }
-
             guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
                   let input = try? AVCaptureDeviceInput(device: device),
                   self.session.canAddInput(input) else {
+                self.session.commitConfiguration()
                 return
             }
 
@@ -63,12 +62,17 @@ final class CameraModel: NSObject, ObservableObject {
                 self.session.addInput(input)
             }
 
-            guard self.session.canAddOutput(self.photoOutput) else { return }
+            guard self.session.canAddOutput(self.photoOutput) else {
+                self.session.commitConfiguration()
+                return
+            }
             if !self.session.outputs.contains(where: { $0 === self.photoOutput }) {
                 self.session.addOutput(self.photoOutput)
             }
 
             self.photoOutput.isHighResolutionCaptureEnabled = true
+
+            self.session.commitConfiguration()
 
             self.session.startRunning()
             DispatchQueue.main.async {
@@ -140,6 +144,10 @@ struct ContentView: View {
 
     private var cameraInterface: some View {
         VStack {
+            Image(systemName: "globe")
+                .imageScale(.large)
+                .foregroundStyle(.tint)
+            Text("Hello, world!")
             CameraPreview(session: cameraModel.session)
                 .overlay(alignment: .bottom) {
                     captureControls
