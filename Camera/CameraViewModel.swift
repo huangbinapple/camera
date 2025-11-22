@@ -8,6 +8,7 @@ final class CameraViewModel: NSObject, ObservableObject {
     @Published var lastCapturedImage: UIImage?
     @Published var photoAuthorizationStatus: PHAuthorizationStatus = PHPhotoLibrary.authorizationStatus(for: .addOnly)
     @Published var savingMessage: String?
+    @Published var lastSavedAssetLocalIdentifier: String?
 
     let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "camera.session.queue")
