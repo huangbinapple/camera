@@ -113,21 +113,35 @@ struct ContentView: View {
         GeometryReader { geometry in
             let aspect = cameraViewModel.previewAspectRatio
             let containerSize = geometry.size
-            let fitWidth: CGFloat
-            let fitHeight: CGFloat
 
-            if containerSize.width / containerSize.height > aspect {
-                fitHeight = containerSize.height
-                fitWidth = fitHeight * aspect
-            } else {
-                fitWidth = containerSize.width
-                fitHeight = fitWidth / aspect
-            }
+            // 把 if/else 收进一个普通闭包中，返回 CGRect
+            let previewFrame: CGRect = {
+                let containerRatio = containerSize.width / containerSize.height
 
-            let previewFrame = CGRect(
-                origin: CGPoint(x: (containerSize.width - fitWidth) / 2, y: (containerSize.height - fitHeight) / 2),
-                size: CGSize(width: fitWidth, height: fitHeight)
-            )
+                if containerRatio > aspect {
+                    // 以高度为基准
+                    let fitHeight = containerSize.height
+                    let fitWidth = fitHeight * aspect
+                    return CGRect(
+                        origin: CGPoint(
+                            x: (containerSize.width - fitWidth) / 2,
+                            y: (containerSize.height - fitHeight) / 2
+                        ),
+                        size: CGSize(width: fitWidth, height: fitHeight)
+                    )
+                } else {
+                    // 以宽度为基准
+                    let fitWidth = containerSize.width
+                    let fitHeight = fitWidth / aspect
+                    return CGRect(
+                        origin: CGPoint(
+                            x: (containerSize.width - fitWidth) / 2,
+                            y: (containerSize.height - fitHeight) / 2
+                        ),
+                        size: CGSize(width: fitWidth, height: fitHeight)
+                    )
+                }
+            }()
 
             let pinchGesture = MagnificationGesture()
                 .onChanged { value in
@@ -188,6 +202,7 @@ struct ContentView: View {
         }
         .background(Color.black)
     }
+
 
     private var controlArea: some View {
         VStack(spacing: 12) {
