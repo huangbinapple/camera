@@ -69,6 +69,40 @@ struct ContentView: View {
                 )
             }
         }
+        .overlay(alignment: .bottomLeading) {
+            VStack(alignment: .leading, spacing: 8) {
+                if cameraViewModel.photoAuthorizationStatus == .denied || cameraViewModel.photoAuthorizationStatus == .restricted {
+                    Text("Photo Library access is required to save photos.")
+                        .font(.footnote)
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.black.opacity(0.6))
+                        .cornerRadius(12)
+
+                    Button(action: openSettings) {
+                        Text("Open Settings")
+                            .font(.footnote.weight(.semibold))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(Color.white.opacity(0.9))
+                            .foregroundColor(.black)
+                            .cornerRadius(12)
+                    }
+                }
+
+                if let message = cameraViewModel.savingMessage {
+                    Text(message)
+                        .font(.footnote)
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.black.opacity(0.6))
+                        .cornerRadius(12)
+                }
+            }
+            .padding([.leading, .bottom], 20)
+        }
         .onAppear {
             cameraViewModel.startSession()
         }

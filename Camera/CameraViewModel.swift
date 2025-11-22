@@ -1,10 +1,13 @@
 import SwiftUI
 import AVFoundation
 import Combine
+import Photos
 
 final class CameraViewModel: NSObject, ObservableObject {
     @Published var authorizationStatus: AVAuthorizationStatus = AVCaptureDevice.authorizationStatus(for: .video)
     @Published var lastCapturedImage: UIImage?
+    @Published var photoAuthorizationStatus: PHAuthorizationStatus = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+    @Published var savingMessage: String?
 
     let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "camera.session.queue")
@@ -106,6 +109,49 @@ final class CameraViewModel: NSObject, ObservableObject {
         }
         photoOutput.capturePhoto(with: settings, delegate: self)
     }
+
+    private func requestPhotoLibraryAccess(completion: @escaping (PHAuthorizationStatus) -> Void) {
+        let currentStatus = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+        if currentStatus == .authorized || currentStatus == .limited {
+            DispatchQueue.main.async {
+                self.photoAuthorizationStatus = currentStatus
+                completion(currentStatus)
+            }
+            return
+        }
+
+        PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+            DispatchQueue.main.async {
+                self.photoAuthorizationStatus = status
+                completion(status)
+            }
+        }
+    }
+
+    private func saveImageToPhotoLibrary(_ image: UIImage) {
+        requestPhotoLibraryAccess { status in
+            guard status == .authorized || status == .limited else {
+                self.savingMessage = "Photo Library access is denied."
+                return
+            }
+
+            PHPhotoLibrary.shared().performChanges({
+                let request = PHAssetChangeRequest.creationRequestForAsset(from: image)
+                request.creationDate = Date()
+            }, completionHandler: { success, error in
+                DispatchQueue.main.async {
+                    if success {
+                        self.savingMessage = nil
+                    } else if let error = error {
+                        self.savingMessage = "Failed to save photo: \(error.localizedDescription)"
+                        print("Photo save error: \(error)")
+                    } else {
+                        self.savingMessage = "Failed to save photo."
+                    }
+                }
+            })
+        }
+    }
 }
 
 extension CameraViewModel: AVCapturePhotoCaptureDelegate {
@@ -114,5 +160,6 @@ extension CameraViewModel: AVCapturePhotoCaptureDelegate {
         DispatchQueue.main.async {
             self.lastCapturedImage = image
         }
+        saveImageToPhotoLibrary(image)
     }
 }
