@@ -4,6 +4,7 @@ import Photos
 
 struct ContentView: View {
     @StateObject private var cameraViewModel = CameraViewModel()
+    @State private var showDocumentPicker = false
 
     var body: some View {
         Group {
@@ -24,24 +25,40 @@ struct ContentView: View {
         .onDisappear {
             cameraViewModel.stopSession()
         }
+        .sheet(isPresented: $showDocumentPicker) {
+            CubeDocumentPicker { url in
+                cameraViewModel.importLUT(from: url)
+            }
+        }
     }
 
     private var authorizedView: some View {
         ZStack {
-            CameraPreviewView(session: cameraViewModel.session)
-                .ignoresSafeArea()
+            if let previewImage = cameraViewModel.currentPreviewImage {
+                Image(uiImage: previewImage)
+                    .resizable()
+                    .scaledToFill()
+                    .ignoresSafeArea()
+            } else {
+                CameraPreviewView(session: cameraViewModel.session)
+                    .ignoresSafeArea()
+            }
 
             VStack {
                 Spacer()
                 HStack(alignment: .center) {
                     if let image = cameraViewModel.lastCapturedImage {
-                        Image(uiImage: image)
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                            .frame(width: 80, height: 80)
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.8), lineWidth: 2))
-                            .padding(.leading, 24)
+                        Button(action: {
+                            cameraViewModel.openLastSavedPhoto()
+                        }) {
+                            Image(uiImage: image)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(width: 80, height: 80)
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.8), lineWidth: 2))
+                                .padding(.leading, 24)
+                        }
                     } else {
                         Spacer().frame(width: 104)
                     }
@@ -103,6 +120,57 @@ struct ContentView: View {
                 }
             }
             .padding([.leading, .bottom], 20)
+        }
+        .overlay(alignment: .topLeading) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    Button(action: {
+                        showDocumentPicker = true
+                    }) {
+                        Text("Import LUT")
+                            .font(.footnote.weight(.semibold))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(Color.white.opacity(0.9))
+                            .foregroundColor(.black)
+                            .cornerRadius(10)
+                    }
+
+                    Menu {
+                        Button("None") {
+                            cameraViewModel.selectedLUT = nil
+                        }
+                        ForEach(cameraViewModel.availableLUTs) { lut in
+                            Button(lut.name) {
+                                cameraViewModel.selectedLUT = lut
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text("LUT: \(cameraViewModel.selectedLUT?.name ?? "None")")
+                                .font(.footnote.weight(.semibold))
+                            Image(systemName: "chevron.down")
+                                .font(.footnote.bold())
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.black.opacity(0.6))
+                        .foregroundColor(.white)
+                        .cornerRadius(10)
+                    }
+                }
+
+                if let message = cameraViewModel.lutStatusMessage {
+                    Text(message)
+                        .font(.footnote)
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.black.opacity(0.6))
+                        .cornerRadius(10)
+                }
+            }
+            .padding([.top, .leading], 20)
         }
         .onAppear {
             cameraViewModel.startSession()
