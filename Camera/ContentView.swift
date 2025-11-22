@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import Photos
 
 struct ContentView: View {
     @StateObject private var cameraViewModel = CameraViewModel()
