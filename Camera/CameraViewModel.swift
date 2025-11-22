@@ -552,7 +552,6 @@ private extension CameraViewModel {
         }
 
         var cubeData = Data(capacity: cubeSize * cubeSize * cubeSize * 4 * MemoryLayout<Float>.size)
-<<<<<<< HEAD
 
         for i in stride(from: 0, to: values.count, by: 3) {
             var r = values[i]
@@ -565,22 +564,6 @@ private extension CameraViewModel {
             withUnsafeBytes(of: &g) { cubeData.append(contentsOf: $0) } // G
             withUnsafeBytes(of: &r) { cubeData.append(contentsOf: $0) } // R
             withUnsafeBytes(of: &a) { cubeData.append(contentsOf: $0) } // A
-=======
-        for rIndex in 0..<cubeSize {
-            for gIndex in 0..<cubeSize {
-                for bIndex in 0..<cubeSize {
-                    let valueIndex = ((rIndex * cubeSize * cubeSize) + (gIndex * cubeSize) + bIndex) * 3
-                    var r = values[valueIndex]
-                    var g = values[valueIndex + 1]
-                    var b = values[valueIndex + 2]
-                    var a: Float = 1.0
-                    withUnsafeBytes(of: &r) { cubeData.append(contentsOf: $0) }
-                    withUnsafeBytes(of: &g) { cubeData.append(contentsOf: $0) }
-                    withUnsafeBytes(of: &b) { cubeData.append(contentsOf: $0) }
-                    withUnsafeBytes(of: &a) { cubeData.append(contentsOf: $0) }
-                }
-            }
->>>>>>> 6476c33c7837de01c7afa2c251777f1660779493
         }
 
 
