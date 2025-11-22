@@ -8,18 +8,76 @@ import CoreImage
 final class CameraViewModel: NSObject, ObservableObject {
     @Published var authorizationStatus: AVAuthorizationStatus = AVCaptureDevice.authorizationStatus(for: .video)
     @Published var lastCapturedImage: UIImage?
+    @Published var currentPreviewImage: UIImage?
     @Published var photoAuthorizationStatus: PHAuthorizationStatus = PHPhotoLibrary.authorizationStatus(for: .addOnly)
     @Published var savingMessage: String?
     @Published var lastSavedAssetLocalIdentifier: String?
     @Published var availableLUTs: [LUTFilter] = []
     @Published var selectedLUT: LUTFilter?
     @Published var lutStatusMessage: String?
+    @Published var previewAspectRatio: CGFloat = 3.0 / 4.0
+    @Published var currentZoomFactor: CGFloat = 1.0
+    @Published var currentFlashMode: FlashMode = .auto
+    @Published var currentCameraPosition: AVCaptureDevice.Position = .back
+    @Published var currentMode: CameraMode = .photo
+    @Published var focusPoint: CGPoint?
+    @Published var isShowingFocusIndicator: Bool = false
 
     let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "camera.session.queue")
     private let photoOutput = AVCapturePhotoOutput()
+    private let videoOutput = AVCaptureVideoDataOutput()
+    private let videoOutputQueue = DispatchQueue(label: "camera.video.output.queue")
     private let ciContext = CIContext()
     private var isSessionConfigured = false
+    private let videoOrientation: AVCaptureVideoOrientation = .portrait
+    private var minZoomFactor: CGFloat = 1.0
+    private var maxZoomFactor: CGFloat = 3.0
+    private var currentVideoDevice: AVCaptureDevice?
+
+    enum FlashMode: CaseIterable {
+        case auto
+        case on
+        case off
+
+        var next: FlashMode {
+            switch self {
+            case .auto: return .on
+            case .on: return .off
+            case .off: return .auto
+            }
+        }
+
+        var captureFlashMode: AVCaptureDevice.FlashMode {
+            switch self {
+            case .auto: return .auto
+            case .on: return .on
+            case .off: return .off
+            }
+        }
+
+        var label: String {
+            switch self {
+            case .auto: return "Auto"
+            case .on: return "On"
+            case .off: return "Off"
+            }
+        }
+
+        var icon: String {
+            switch self {
+            case .auto: return "⚡︎ Auto"
+            case .on: return "⚡︎ On"
+            case .off: return "⚡︎ Off"
+            }
+        }
+    }
+
+    enum CameraMode: String, CaseIterable {
+        case video = "视频"
+        case photo = "照片"
+        case portrait = "人像"
+    }
 
     override init() {
         super.init()
@@ -98,6 +156,81 @@ final class CameraViewModel: NSObject, ObservableObject {
         }
     }
 
+    func switchCamera() {
+        sessionQueue.async {
+            self.currentCameraPosition = self.currentCameraPosition == .back ? .front : .back
+            self.isSessionConfigured = false
+            self.configureSession()
+            if self.isSessionConfigured, !self.session.isRunning {
+                self.session.startRunning()
+            }
+        }
+    }
+
+    func cycleFlashMode() {
+        DispatchQueue.main.async {
+            self.currentFlashMode = self.currentFlashMode.next
+        }
+    }
+
+    func setZoom(to factor: CGFloat) {
+        sessionQueue.async {
+            guard let device = self.currentVideoDevice else { return }
+            let clamped = min(max(factor, self.minZoomFactor), self.maxZoomFactor)
+            do {
+                try device.lockForConfiguration()
+                device.videoZoomFactor = clamped
+                device.unlockForConfiguration()
+                DispatchQueue.main.async {
+                    self.currentZoomFactor = clamped
+                }
+            } catch {
+                print("Failed to set zoom: \(error)")
+            }
+        }
+    }
+
+    func setZoomPreset(_ factor: CGFloat) {
+        setZoom(to: factor)
+    }
+
+    func focus(at point: CGPoint, frameSize: CGSize) {
+        sessionQueue.async {
+            guard let device = self.currentVideoDevice else { return }
+            let normalizedPoint = CGPoint(x: point.y / frameSize.height, y: 1.0 - (point.x / frameSize.width))
+            do {
+                try device.lockForConfiguration()
+                if device.isFocusPointOfInterestSupported {
+                    device.focusPointOfInterest = normalizedPoint
+                    if device.isFocusModeSupported(.autoFocus) {
+                        device.focusMode = .autoFocus
+                    }
+                }
+                if device.isExposurePointOfInterestSupported {
+                    device.exposurePointOfInterest = normalizedPoint
+                    if device.isExposureModeSupported(.continuousAutoExposure) {
+                        device.exposureMode = .continuousAutoExposure
+                    }
+                }
+                device.unlockForConfiguration()
+            } catch {
+                print("Failed to focus: \(error)")
+            }
+        }
+
+        DispatchQueue.main.async {
+            self.focusPoint = point
+            withAnimation(.easeInOut(duration: 0.2)) {
+                self.isShowingFocusIndicator = true
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                withAnimation(.easeOut(duration: 0.3)) {
+                    self.isShowingFocusIndicator = false
+                }
+            }
+        }
+    }
+
     private func configureSession() {
         session.beginConfiguration()
         session.sessionPreset = .photo
@@ -107,7 +240,7 @@ final class CameraViewModel: NSObject, ObservableObject {
             session.removeInput(input)
         }
 
-        guard let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
+        guard let videoDevice = selectVideoDevice(position: currentCameraPosition) else {
             session.commitConfiguration()
             return
         }
@@ -127,16 +260,45 @@ final class CameraViewModel: NSObject, ObservableObject {
             photoOutput.isHighResolutionCaptureEnabled = true
         }
 
+        videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+        videoOutput.alwaysDiscardsLateVideoFrames = true
+
+        if session.canAddOutput(videoOutput) {
+            session.addOutput(videoOutput)
+            videoOutput.setSampleBufferDelegate(self, queue: videoOutputQueue)
+            videoOutput.connections.forEach { connection in
+                if connection.isVideoOrientationSupported {
+                    connection.videoOrientation = videoOrientation
+                }
+            }
+        }
+
         session.commitConfiguration()
         isSessionConfigured = true
+
+        currentVideoDevice = videoDevice
+        updateZoomLimits(for: videoDevice)
+        setZoom(to: currentZoomFactor)
+
+        let formatDescription = videoDevice.activeFormat.formatDescription
+        let dimensions = CMVideoFormatDescriptionGetDimensions(formatDescription)
+        let aspect = videoOrientation == .portrait || videoOrientation == .portraitUpsideDown
+            ? CGFloat(dimensions.height) / CGFloat(dimensions.width)
+            : CGFloat(dimensions.width) / CGFloat(dimensions.height)
+        DispatchQueue.main.async {
+            self.previewAspectRatio = aspect
+        }
     }
 
     func capturePhoto() {
         guard authorizationStatus == .authorized, isSessionConfigured else { return }
         let settings = AVCapturePhotoSettings()
         settings.isHighResolutionPhotoEnabled = photoOutput.isHighResolutionCaptureEnabled
-        if photoOutput.supportedFlashModes.contains(.off) {
-            settings.flashMode = .off
+        if photoOutput.supportedFlashModes.contains(currentFlashMode.captureFlashMode) {
+            settings.flashMode = currentFlashMode.captureFlashMode
+        }
+        if let connection = photoOutput.connection(with: .video), connection.isVideoOrientationSupported {
+            connection.videoOrientation = videoOrientation
         }
         photoOutput.capturePhoto(with: settings, delegate: self)
     }
@@ -230,6 +392,31 @@ extension CameraViewModel: AVCapturePhotoCaptureDelegate {
     }
 }
 
+extension CameraViewModel: AVCaptureVideoDataOutputSampleBufferDelegate {
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let processedImage: CIImage
+
+        if let lut = selectedLUT, let filtered = applyLUT(to: ciImage, lut: lut) {
+            processedImage = filtered
+        } else {
+            processedImage = ciImage
+        }
+
+        guard let cgImage = ciContext.createCGImage(processedImage, from: processedImage.extent) else {
+            print("Failed to create CGImage for preview frame")
+            return
+        }
+
+        let uiImage = UIImage(cgImage: cgImage)
+        DispatchQueue.main.async {
+            self.currentPreviewImage = uiImage
+        }
+    }
+}
+
 private extension CameraViewModel {
     enum LUTParserError: LocalizedError {
         case invalidFormat
@@ -303,16 +490,41 @@ private extension CameraViewModel {
         guard let cgImage = image.cgImage else { return nil }
         let inputImage = CIImage(cgImage: cgImage)
 
-        guard let filter = CIFilter(name: "CIColorCube") else { return nil }
-        filter.setValue(inputImage, forKey: kCIInputImageKey)
-        filter.setValue(lut.cubeSize, forKey: "inputCubeDimension")
-        filter.setValue(lut.cubeData, forKey: "inputCubeData")
-
-        guard let outputImage = filter.outputImage,
-              let outputCGImage = ciContext.createCGImage(outputImage, from: outputImage.extent) else {
+        guard let filtered = applyLUT(to: inputImage, lut: lut),
+              let outputCGImage = ciContext.createCGImage(filtered, from: filtered.extent) else {
             return nil
         }
 
         return UIImage(cgImage: outputCGImage, scale: image.scale, orientation: image.imageOrientation)
+    }
+
+    func applyLUT(to ciImage: CIImage, lut: LUTFilter) -> CIImage? {
+        guard let filter = CIFilter(name: "CIColorCube") else {
+            print("Failed to create CIColorCube filter")
+            return nil
+        }
+        filter.setValue(ciImage, forKey: kCIInputImageKey)
+        filter.setValue(lut.cubeSize, forKey: "inputCubeDimension")
+        filter.setValue(lut.cubeData, forKey: "inputCubeData")
+        guard let output = filter.outputImage else {
+            print("CIColorCube failed to produce output image")
+            return nil
+        }
+        return output
+    }
+
+    func selectVideoDevice(position: AVCaptureDevice.Position) -> AVCaptureDevice? {
+        if let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position) {
+            return device
+        }
+        return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .unspecified)
+    }
+
+    func updateZoomLimits(for device: AVCaptureDevice) {
+        minZoomFactor = max(1.0, device.minAvailableVideoZoomFactor)
+        maxZoomFactor = min(3.0, device.maxAvailableVideoZoomFactor)
+        DispatchQueue.main.async {
+            self.currentZoomFactor = min(max(self.currentZoomFactor, self.minZoomFactor), self.maxZoomFactor)
+        }
     }
 }
