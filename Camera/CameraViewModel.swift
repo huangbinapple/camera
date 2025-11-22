@@ -32,12 +32,14 @@ final class CameraViewModel: NSObject, ObservableObject {
     private let videoOutput = AVCaptureVideoDataOutput()
     private let videoOutputQueue = DispatchQueue(label: "camera.video.output.queue")
     private let ciContext = CIContext()
+    private var srgbToFLogLUT: LUTFilter?
     private var isSessionConfigured = false
     private let videoOrientation: AVCaptureVideoOrientation = .portrait
     private var videoDevice: AVCaptureDevice?
 
     override init() {
         super.init()
+        loadInternalLUTs()
     }
 
     func checkPermissions() {
@@ -387,11 +389,10 @@ enum CameraMode: String, CaseIterable {
 extension CameraViewModel: AVCapturePhotoCaptureDelegate {
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
         guard error == nil, let data = photo.fileDataRepresentation(), let cgImage = UIImage(data: data)?.cgImage else { return }
-        let selectedLUT = self.selectedLUT
 
         DispatchQueue.global(qos: .userInitiated).async {
             let inputImage = CIImage(cgImage: cgImage)
-            let lutAppliedImage = selectedLUT.flatMap { self.applyLUT(to: inputImage, lut: $0) } ?? inputImage
+            let lutAppliedImage = self.applyLUTPipeline(to: inputImage)
             let finalCIImage = self.mirroredIfNeeded(lutAppliedImage)
 
             guard let outputCGImage = self.ciContext.createCGImage(finalCIImage, from: finalCIImage.extent) else { return }
@@ -410,15 +411,8 @@ extension CameraViewModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        let processedImage: CIImage
-
-        if let lut = selectedLUT, let filtered = applyLUT(to: ciImage, lut: lut) {
-            processedImage = filtered
-        } else {
-            processedImage = ciImage
-        }
-
-        let mirroredImage = mirroredIfNeeded(processedImage)
+        let lutApplied = applyLUTPipeline(to: ciImage)
+        let mirroredImage = mirroredIfNeeded(lutApplied)
 
         guard let cgImage = ciContext.createCGImage(mirroredImage, from: mirroredImage.extent) else {
             print("Failed to create CGImage for preview frame")
@@ -607,6 +601,24 @@ private extension CameraViewModel {
         return output
     }
 
+    func applyLUTPipeline(to ciImage: CIImage) -> CIImage {
+        guard let creativeLUT = selectedLUT else {
+            return ciImage
+        }
+
+        var workingImage = ciImage
+
+        if let baseLUT = srgbToFLogLUT, let baseApplied = applyLUT(to: workingImage, lut: baseLUT) {
+            workingImage = baseApplied
+        }
+
+        if let creativeApplied = applyLUT(to: workingImage, lut: creativeLUT) {
+            workingImage = creativeApplied
+        }
+
+        return workingImage
+    }
+
     func mirroredIfNeeded(_ image: CIImage) -> CIImage {
         guard isFrontCamera else { return image }
         let transform = CGAffineTransform(scaleX: -1, y: 1).translatedBy(x: -image.extent.width, y: 0)
@@ -632,5 +644,11 @@ private extension CameraViewModel {
         clampFilter.setValue(CIVector(x: 1, y: 1, z: 1, w: 1), forKey: "inputMaxComponents")
 
         return clampFilter.outputImage ?? scaledImage
+    }
+
+    func loadInternalLUTs() {
+        if let url = Bundle.main.url(forResource: "srgb_to_flog2_balanced", withExtension: "cube") {
+            srgbToFLogLUT = try? parseCubeLUT(from: url)
+        }
     }
 }
