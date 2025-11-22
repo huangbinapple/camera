@@ -34,7 +34,7 @@ struct ContentView: View {
 
     private var authorizedView: some View {
         ZStack {
-            CameraPreviewView(session: cameraViewModel.session)
+            FilteredCameraPreview(viewModel: cameraViewModel)
                 .ignoresSafeArea()
 
             VStack {
@@ -217,6 +217,29 @@ struct ContentView: View {
     private func openSettings() {
         guard let settingsURL = URL(string: UIApplication.openSettingsURLString), UIApplication.shared.canOpenURL(settingsURL) else { return }
         UIApplication.shared.open(settingsURL)
+    }
+}
+
+struct FilteredCameraPreview: View {
+    @ObservedObject var viewModel: CameraViewModel
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                Color.black
+
+                if let image = viewModel.currentPreviewImage {
+                    Image(uiImage: image)
+                        .resizable()
+                        .aspectRatio(viewModel.previewAspectRatio, contentMode: .fit)
+                        .frame(maxWidth: geometry.size.width, maxHeight: geometry.size.height)
+                        .background(Color.black)
+                } else {
+                    Color.black
+                }
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+        }
     }
 }
 
