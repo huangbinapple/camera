@@ -1,21 +1,176 @@
-//
-//  ContentView.swift
-//  Camera
-//
-//  Created by 黄斌 on 2025/11/22.
-//
-
 import SwiftUI
+import AVFoundation
 
 struct ContentView: View {
+    @StateObject private var cameraViewModel = CameraViewModel()
+
     var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
+        Group {
+            switch cameraViewModel.authorizationStatus {
+            case .authorized:
+                authorizedView
+            case .notDetermined:
+                permissionPrompt
+            case .denied, .restricted:
+                deniedView
+            @unknown default:
+                deniedView
+            }
+        }
+        .onAppear {
+            cameraViewModel.checkPermissions()
+        }
+        .onDisappear {
+            cameraViewModel.stopSession()
+        }
+    }
+
+    private var authorizedView: some View {
+        ZStack {
+            CameraPreviewView(session: cameraViewModel.session)
+                .ignoresSafeArea()
+
+            VStack {
+                Spacer()
+                HStack(alignment: .center) {
+                    if let image = cameraViewModel.lastCapturedImage {
+                        Button(action: openLastSavedPhoto) {
+                            Image(uiImage: image)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(width: 80, height: 80)
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.8), lineWidth: 2))
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.leading, 24)
+                    } else {
+                        Spacer().frame(width: 104)
+                    }
+
+                    Spacer()
+
+                    Button(action: {
+                        cameraViewModel.capturePhoto()
+                    }) {
+                        Circle()
+                            .strokeBorder(Color.white, lineWidth: 6)
+                            .background(Circle().fill(Color.white.opacity(0.8)))
+                            .frame(width: 86, height: 86)
+                            .shadow(radius: 4)
+                    }
+                    .padding(.bottom, 10)
+
+                    Spacer()
+
+                    Spacer().frame(width: 104)
+                }
+                .padding(.bottom, 32)
+                .background(
+                    LinearGradient(gradient: Gradient(colors: [Color.black.opacity(0.4), Color.black.opacity(0.1), .clear]), startPoint: .bottom, endPoint: .top)
+                        .ignoresSafeArea()
+                )
+            }
+        }
+        .overlay(alignment: .bottomLeading) {
+            VStack(alignment: .leading, spacing: 8) {
+                if cameraViewModel.photoAuthorizationStatus == .denied || cameraViewModel.photoAuthorizationStatus == .restricted {
+                    Text("Photo Library access is required to save photos.")
+                        .font(.footnote)
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.black.opacity(0.6))
+                        .cornerRadius(12)
+
+                    Button(action: openSettings) {
+                        Text("Open Settings")
+                            .font(.footnote.weight(.semibold))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(Color.white.opacity(0.9))
+                            .foregroundColor(.black)
+                            .cornerRadius(12)
+                    }
+                }
+
+                if let message = cameraViewModel.savingMessage {
+                    Text(message)
+                        .font(.footnote)
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.black.opacity(0.6))
+                        .cornerRadius(12)
+                }
+            }
+            .padding([.leading, .bottom], 20)
+        }
+        .onAppear {
+            cameraViewModel.startSession()
+        }
+    }
+
+    private var permissionPrompt: some View {
+        VStack(spacing: 16) {
+            Text("Camera Access Needed")
+                .font(.title2)
+                .bold()
+            Text("Please allow camera access to take photos.")
+                .multilineTextAlignment(.center)
+                .foregroundColor(.secondary)
+            Button(action: {
+                cameraViewModel.checkPermissions()
+            }) {
+                Text("Grant Camera Access")
+                    .padding()
+                    .frame(maxWidth: .infinity)
+                    .background(Color.accentColor)
+                    .foregroundColor(.white)
+                    .cornerRadius(12)
+            }
+            .padding(.horizontal)
         }
         .padding()
+    }
+
+    private var deniedView: some View {
+        VStack(spacing: 16) {
+            Text("Camera Access Denied")
+                .font(.title2)
+                .bold()
+            Text("Please enable camera access in Settings to use the camera.")
+                .multilineTextAlignment(.center)
+                .foregroundColor(.secondary)
+            Button(action: openSettings) {
+                Text("Open Settings")
+                    .padding()
+                    .frame(maxWidth: .infinity)
+                    .background(Color.accentColor)
+                    .foregroundColor(.white)
+                    .cornerRadius(12)
+            }
+            .padding(.horizontal)
+        }
+        .padding()
+    }
+
+    private func openSettings() {
+        guard let settingsURL = URL(string: UIApplication.openSettingsURLString), UIApplication.shared.canOpenURL(settingsURL) else { return }
+        UIApplication.shared.open(settingsURL)
+    }
+
+    private func openLastSavedPhoto() {
+        guard cameraViewModel.lastCapturedImage != nil else { return }
+        let urls = cameraViewModel.photosDeepLinkURLs()
+        DispatchQueue.main.async {
+            let application = UIApplication.shared
+            if let assetURL = urls.asset, application.canOpenURL(assetURL) {
+                application.open(assetURL)
+            } else if let fallbackURL = urls.fallback, application.canOpenURL(fallbackURL) {
+                application.open(fallbackURL)
+            }
+        }
     }
 }
 
