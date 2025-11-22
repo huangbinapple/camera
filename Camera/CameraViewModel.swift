@@ -4,6 +4,7 @@ import Combine
 import Photos
 import UIKit
 import CoreImage
+import simd
 
 final class CameraViewModel: NSObject, ObservableObject {
     @Published var authorizationStatus: AVAuthorizationStatus = AVCaptureDevice.authorizationStatus(for: .video)
@@ -92,6 +93,7 @@ final class CameraViewModel: NSObject, ObservableObject {
                 }
             } catch {
                 DispatchQueue.main.async {
+                    self.selectedLUT = nil
                     self.lutStatusMessage = "Failed to import LUT: \(error.localizedDescription)"
                 }
             }
@@ -470,6 +472,7 @@ private extension CameraViewModel {
         case invalidFormat
         case missingSize
         case invalidDataCount
+        case invalidDomain
 
         var errorDescription: String? {
             switch self {
@@ -479,6 +482,8 @@ private extension CameraViewModel {
                 return "LUT size is missing."
             case .invalidDataCount:
                 return "LUT data count does not match the expected size."
+            case .invalidDomain:
+                return "LUT domain is invalid."
             }
         }
     }
@@ -490,27 +495,46 @@ private extension CameraViewModel {
         var size: Int?
         var values: [Float] = []
 
-        let numberFormatter = NumberFormatter()
-        numberFormatter.decimalSeparator = "."
+        var domainMin = SIMD3<Float>(repeating: 0)
+        var domainMax = SIMD3<Float>(repeating: 1)
 
         for rawLine in lines {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
             guard !line.isEmpty, !line.hasPrefix("#") else { continue }
 
-            if line.uppercased().hasPrefix("LUT_3D_SIZE") {
-                let parts = line.components(separatedBy: .whitespaces).compactMap { Int($0) }
-                if let dimension = parts.last {
+            let upperLine = line.uppercased()
+            if upperLine.hasPrefix("LUT_3D_SIZE") {
+                let components = line.split(whereSeparator: { $0.isWhitespace }).compactMap { Int($0) }
+                if let dimension = components.last {
                     size = dimension
                 }
                 continue
             }
 
-            let components = line.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+            if upperLine.hasPrefix("DOMAIN_MIN") {
+                let components = line.split(whereSeparator: { $0.isWhitespace }).compactMap { Float($0) }
+                guard components.count == 3 else { throw LUTParserError.invalidFormat }
+                domainMin = SIMD3<Float>(components[0], components[1], components[2])
+                continue
+            }
+
+            if upperLine.hasPrefix("DOMAIN_MAX") {
+                let components = line.split(whereSeparator: { $0.isWhitespace }).compactMap { Float($0) }
+                guard components.count == 3 else { throw LUTParserError.invalidFormat }
+                domainMax = SIMD3<Float>(components[0], components[1], components[2])
+                continue
+            }
+
+            let components = line.split(whereSeparator: { $0.isWhitespace }).map(String.init)
             guard components.count == 3 else { continue }
 
-            let rgb = components.compactMap { numberFormatter.number(from: $0)?.floatValue }
-            guard rgb.count == 3 else { throw LUTParserError.invalidFormat }
-            values.append(contentsOf: rgb)
+            guard let r = Float(components[0]),
+                  let g = Float(components[1]),
+                  let b = Float(components[2]) else {
+                throw LUTParserError.invalidFormat
+            }
+
+            values.append(contentsOf: [r, g, b])
         }
 
         guard let cubeSize = size else { throw LUTParserError.missingSize }
@@ -518,20 +542,33 @@ private extension CameraViewModel {
         let expectedValueCount = cubeSize * cubeSize * cubeSize * 3
         guard values.count == expectedValueCount else { throw LUTParserError.invalidDataCount }
 
-        var cubeData = Data(capacity: cubeSize * cubeSize * cubeSize * 4 * MemoryLayout<Float>.size)
-        for index in stride(from: 0, to: values.count, by: 3) {
-            var r = values[index]
-            var g = values[index + 1]
-            var b = values[index + 2]
-            var a: Float = 1.0
-            withUnsafeBytes(of: &r) { cubeData.append(contentsOf: $0) }
-            withUnsafeBytes(of: &g) { cubeData.append(contentsOf: $0) }
-            withUnsafeBytes(of: &b) { cubeData.append(contentsOf: $0) }
-            withUnsafeBytes(of: &a) { cubeData.append(contentsOf: $0) }
+        guard domainMax.x > domainMin.x, domainMax.y > domainMin.y, domainMax.z > domainMin.z else {
+            throw LUTParserError.invalidDomain
         }
 
+        if let maxValue = values.max(), maxValue > 1.0 {
+            let normalizationFactor: Float = maxValue <= 255 ? 255.0 : maxValue
+            values = values.map { $0 / normalizationFactor }
+        }
+
+        var cubeData = Data(capacity: cubeSize * cubeSize * cubeSize * 4 * MemoryLayout<Float>.size)
+
+        for i in stride(from: 0, to: values.count, by: 3) {
+            var r = values[i]
+            var g = values[i + 1]
+            var b = values[i + 2]
+            var a: Float = 1.0
+
+            // 🔥 关键：把 R / B 互换写入，让 LUT 体按 BGR 排布
+            withUnsafeBytes(of: &b) { cubeData.append(contentsOf: $0) } // B
+            withUnsafeBytes(of: &g) { cubeData.append(contentsOf: $0) } // G
+            withUnsafeBytes(of: &r) { cubeData.append(contentsOf: $0) } // R
+            withUnsafeBytes(of: &a) { cubeData.append(contentsOf: $0) } // A
+        }
+
+
         let name = url.deletingPathExtension().lastPathComponent
-        return LUTFilter(name: name, cubeSize: cubeSize, cubeData: cubeData)
+        return LUTFilter(name: name, cubeSize: cubeSize, cubeData: cubeData, domainMin: domainMin, domainMax: domainMax)
     }
 
     func applyLUT(to image: UIImage, lut: LUTFilter) -> UIImage? {
@@ -547,11 +584,21 @@ private extension CameraViewModel {
     }
 
     func applyLUT(to ciImage: CIImage, lut: LUTFilter) -> CIImage? {
+        var workingImage = ciImage
+
+        if lut.domainMin != SIMD3<Float>(repeating: 0) || lut.domainMax != SIMD3<Float>(repeating: 1) {
+            guard let scaled = applyDomainMapping(to: workingImage, min: lut.domainMin, max: lut.domainMax) else {
+                print("Failed to scale image into LUT domain")
+                return nil
+            }
+            workingImage = scaled
+        }
+
         guard let filter = CIFilter(name: "CIColorCube") else {
             print("Failed to create CIColorCube filter")
             return nil
         }
-        filter.setValue(ciImage, forKey: kCIInputImageKey)
+        filter.setValue(workingImage, forKey: kCIInputImageKey)
         filter.setValue(lut.cubeSize, forKey: "inputCubeDimension")
         filter.setValue(lut.cubeData, forKey: "inputCubeData")
         guard let output = filter.outputImage else {
@@ -565,5 +612,26 @@ private extension CameraViewModel {
         guard isFrontCamera else { return image }
         let transform = CGAffineTransform(scaleX: -1, y: 1).translatedBy(x: -image.extent.width, y: 0)
         return image.transformed(by: transform)
+    }
+
+    func applyDomainMapping(to image: CIImage, min: SIMD3<Float>, max: SIMD3<Float>) -> CIImage? {
+        let range = max - min
+        guard range.x > 0, range.y > 0, range.z > 0 else { return nil }
+
+        guard let matrixFilter = CIFilter(name: "CIColorMatrix") else { return nil }
+        matrixFilter.setValue(image, forKey: kCIInputImageKey)
+        matrixFilter.setValue(CIVector(x: CGFloat(1.0 / range.x), y: 0, z: 0, w: 0), forKey: "inputRVector")
+        matrixFilter.setValue(CIVector(x: 0, y: CGFloat(1.0 / range.y), z: 0, w: 0), forKey: "inputGVector")
+        matrixFilter.setValue(CIVector(x: 0, y: 0, z: CGFloat(1.0 / range.z), w: 0), forKey: "inputBVector")
+        matrixFilter.setValue(CIVector(x: CGFloat(-min.x / range.x), y: CGFloat(-min.y / range.y), z: CGFloat(-min.z / range.z), w: 0), forKey: "inputBiasVector")
+
+        guard let scaledImage = matrixFilter.outputImage else { return nil }
+
+        guard let clampFilter = CIFilter(name: "CIColorClamp") else { return scaledImage }
+        clampFilter.setValue(scaledImage, forKey: kCIInputImageKey)
+        clampFilter.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputMinComponents")
+        clampFilter.setValue(CIVector(x: 1, y: 1, z: 1, w: 1), forKey: "inputMaxComponents")
+
+        return clampFilter.outputImage ?? scaledImage
     }
 }
