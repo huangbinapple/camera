@@ -4,6 +4,7 @@ import Combine
 import Photos
 import UIKit
 import CoreImage
+import simd
 
 final class CameraViewModel: NSObject, ObservableObject {
     @Published var authorizationStatus: AVAuthorizationStatus = AVCaptureDevice.authorizationStatus(for: .video)
@@ -22,6 +23,8 @@ final class CameraViewModel: NSObject, ObservableObject {
     @Published var currentZoomFactor: CGFloat = 1.0
     @Published var minZoomFactor: CGFloat = 1.0
     @Published var maxZoomFactor: CGFloat = 3.0
+
+    var isFrontCamera: Bool { currentCameraPosition == .front }
 
     let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "camera.session.queue")
@@ -90,6 +93,7 @@ final class CameraViewModel: NSObject, ObservableObject {
                 }
             } catch {
                 DispatchQueue.main.async {
+                    self.selectedLUT = nil
                     self.lutStatusMessage = "Failed to import LUT: \(error.localizedDescription)"
                 }
             }
@@ -145,6 +149,7 @@ final class CameraViewModel: NSObject, ObservableObject {
                 DispatchQueue.main.async {
                     self.currentCameraPosition = newPosition
                     self.currentZoomFactor = self.minZoomFactor
+                    self.currentPreviewImage = nil
                 }
             } catch {
                 print("Failed to switch camera: \(error)")
@@ -381,16 +386,16 @@ enum CameraMode: String, CaseIterable {
 
 extension CameraViewModel: AVCapturePhotoCaptureDelegate {
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
-        guard error == nil, let data = photo.fileDataRepresentation(), let image = UIImage(data: data) else { return }
+        guard error == nil, let data = photo.fileDataRepresentation(), let cgImage = UIImage(data: data)?.cgImage else { return }
         let selectedLUT = self.selectedLUT
-        DispatchQueue.global(qos: .userInitiated).async {
-            let processedImage: UIImage
 
-            if let lut = selectedLUT, let filtered = self.applyLUT(to: image, lut: lut) {
-                processedImage = filtered
-            } else {
-                processedImage = image
-            }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let inputImage = CIImage(cgImage: cgImage)
+            let lutAppliedImage = selectedLUT.flatMap { self.applyLUT(to: inputImage, lut: $0) } ?? inputImage
+            let finalCIImage = self.mirroredIfNeeded(lutAppliedImage)
+
+            guard let outputCGImage = self.ciContext.createCGImage(finalCIImage, from: finalCIImage.extent) else { return }
+            let processedImage = UIImage(cgImage: outputCGImage, scale: UIScreen.main.scale, orientation: .up)
 
             DispatchQueue.main.async {
                 self.lastCapturedImage = processedImage
@@ -413,7 +418,9 @@ extension CameraViewModel: AVCaptureVideoDataOutputSampleBufferDelegate {
             processedImage = ciImage
         }
 
-        guard let cgImage = ciContext.createCGImage(processedImage, from: processedImage.extent) else {
+        let mirroredImage = mirroredIfNeeded(processedImage)
+
+        guard let cgImage = ciContext.createCGImage(mirroredImage, from: mirroredImage.extent) else {
             print("Failed to create CGImage for preview frame")
             return
         }
@@ -442,11 +449,11 @@ private extension CameraViewModel {
         let orientation = videoOrientation
         if let connection = videoOutput.connection(with: .video), connection.isVideoOrientationSupported {
             connection.videoOrientation = orientation
-            connection.isVideoMirrored = currentCameraPosition == .front
+            connection.isVideoMirrored = false
         }
         if let connection = photoOutput.connection(with: .video), connection.isVideoOrientationSupported {
             connection.videoOrientation = orientation
-            connection.isVideoMirrored = currentCameraPosition == .front
+            connection.isVideoMirrored = false
         }
     }
 
@@ -464,7 +471,9 @@ private extension CameraViewModel {
     enum LUTParserError: LocalizedError {
         case invalidFormat
         case missingSize
-        case invalidDataCount
+        case invalidDataCount(expected: Int, actual: Int)
+        case invalidDomainRange
+        case unsupportedValueRange
 
         var errorDescription: String? {
             switch self {
@@ -472,8 +481,12 @@ private extension CameraViewModel {
                 return "Invalid LUT format."
             case .missingSize:
                 return "LUT size is missing."
-            case .invalidDataCount:
-                return "LUT data count does not match the expected size."
+            case let .invalidDataCount(expected, actual):
+                return "LUT data count (\(actual)) does not match expected size (\(expected))."
+            case .invalidDomainRange:
+                return "DOMAIN_MIN and DOMAIN_MAX must define a valid range."
+            case .unsupportedValueRange:
+                return "LUT values are outside the supported range."
             }
         }
     }
@@ -484,34 +497,61 @@ private extension CameraViewModel {
 
         var size: Int?
         var values: [Float] = []
-
-        let numberFormatter = NumberFormatter()
-        numberFormatter.decimalSeparator = "."
+        var domainMin = SIMD3<Float>(repeating: 0)
+        var domainMax = SIMD3<Float>(repeating: 1)
 
         for rawLine in lines {
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
-            guard !line.isEmpty, !line.hasPrefix("#") else { continue }
+            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { continue }
 
-            if line.uppercased().hasPrefix("LUT_3D_SIZE") {
-                let parts = line.components(separatedBy: .whitespaces).compactMap { Int($0) }
-                if let dimension = parts.last {
+            let uppercased = trimmed.uppercased()
+            if uppercased.hasPrefix("LUT_3D_SIZE") {
+                let parts = trimmed.split(whereSeparator: { $0.isWhitespace })
+                if let last = parts.last, let dimension = Int(last) {
                     size = dimension
                 }
                 continue
             }
 
-            let components = line.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
-            guard components.count == 3 else { continue }
+            if uppercased.hasPrefix("DOMAIN_MIN") {
+                let numbers = trimmed
+                    .split(whereSeparator: { $0.isWhitespace })
+                    .compactMap { Float($0) }
+                if numbers.count == 3 {
+                    domainMin = SIMD3<Float>(numbers[0], numbers[1], numbers[2])
+                }
+                continue
+            }
 
-            let rgb = components.compactMap { numberFormatter.number(from: $0)?.floatValue }
-            guard rgb.count == 3 else { throw LUTParserError.invalidFormat }
-            values.append(contentsOf: rgb)
+            if uppercased.hasPrefix("DOMAIN_MAX") {
+                let numbers = trimmed
+                    .split(whereSeparator: { $0.isWhitespace })
+                    .compactMap { Float($0) }
+                if numbers.count == 3 {
+                    domainMax = SIMD3<Float>(numbers[0], numbers[1], numbers[2])
+                }
+                continue
+            }
+
+            let components = trimmed.split(whereSeparator: { $0.isWhitespace }).compactMap { Float($0) }
+            guard components.count == 3 else { continue }
+            values.append(contentsOf: components)
         }
 
         guard let cubeSize = size else { throw LUTParserError.missingSize }
 
         let expectedValueCount = cubeSize * cubeSize * cubeSize * 3
-        guard values.count == expectedValueCount else { throw LUTParserError.invalidDataCount }
+        guard values.count == expectedValueCount else { throw LUTParserError.invalidDataCount(expected: expectedValueCount, actual: values.count) }
+
+        guard domainMax.x > domainMin.x, domainMax.y > domainMin.y, domainMax.z > domainMin.z else {
+            throw LUTParserError.invalidDomainRange
+        }
+
+        if let maxValue = values.max(), maxValue > 1.0001 {
+            guard maxValue <= 255 else { throw LUTParserError.unsupportedValueRange }
+            let scale: Float = 1.0 / 255.0
+            values = values.map { $0 * scale }
+        }
 
         var cubeData = Data(capacity: cubeSize * cubeSize * cubeSize * 4 * MemoryLayout<Float>.size)
         for index in stride(from: 0, to: values.count, by: 3) {
@@ -526,7 +566,7 @@ private extension CameraViewModel {
         }
 
         let name = url.deletingPathExtension().lastPathComponent
-        return LUTFilter(name: name, cubeSize: cubeSize, cubeData: cubeData)
+        return LUTFilter(name: name, cubeSize: cubeSize, cubeData: cubeData, domainMin: domainMin, domainMax: domainMax)
     }
 
     func applyLUT(to image: UIImage, lut: LUTFilter) -> UIImage? {
@@ -546,7 +586,8 @@ private extension CameraViewModel {
             print("Failed to create CIColorCube filter")
             return nil
         }
-        filter.setValue(ciImage, forKey: kCIInputImageKey)
+        let preparedInput = applyDomainMapping(ciImage, domainMin: lut.domainMin, domainMax: lut.domainMax)
+        filter.setValue(preparedInput, forKey: kCIInputImageKey)
         filter.setValue(lut.cubeSize, forKey: "inputCubeDimension")
         filter.setValue(lut.cubeData, forKey: "inputCubeData")
         guard let output = filter.outputImage else {
@@ -554,5 +595,45 @@ private extension CameraViewModel {
             return nil
         }
         return output
+    }
+
+    func mirroredIfNeeded(_ image: CIImage) -> CIImage {
+        guard isFrontCamera else { return image }
+        let transform = CGAffineTransform(scaleX: -1, y: 1).translatedBy(x: -image.extent.width, y: 0)
+        return image.transformed(by: transform)
+    }
+
+    func applyDomainMapping(_ image: CIImage, domainMin: SIMD3<Float>, domainMax: SIMD3<Float>) -> CIImage {
+        let defaultMin = SIMD3<Float>(repeating: 0)
+        let defaultMax = SIMD3<Float>(repeating: 1)
+        guard domainMin != defaultMin || domainMax != defaultMax else { return image }
+
+        let minVector = CIVector(x: CGFloat(domainMin.x), y: CGFloat(domainMin.y), z: CGFloat(domainMin.z), w: 0)
+        let maxVector = CIVector(x: CGFloat(domainMax.x), y: CGFloat(domainMax.y), z: CGFloat(domainMax.z), w: 1)
+        let clamped = CIFilter(name: "CIColorClamp", parameters: [
+            kCIInputImageKey: image,
+            "inputMinComponents": minVector,
+            "inputMaxComponents": maxVector
+        ])?.outputImage ?? image
+
+        let scale = domainMax - domainMin
+        let rVector = CIVector(x: CGFloat(1 / scale.x), y: 0, z: 0, w: 0)
+        let gVector = CIVector(x: 0, y: CGFloat(1 / scale.y), z: 0, w: 0)
+        let bVector = CIVector(x: 0, y: 0, z: CGFloat(1 / scale.z), w: 0)
+        let biasVector = CIVector(
+            x: CGFloat(-domainMin.x / scale.x),
+            y: CGFloat(-domainMin.y / scale.y),
+            z: CGFloat(-domainMin.z / scale.z),
+            w: 0
+        )
+
+        return CIFilter(name: "CIColorMatrix", parameters: [
+            kCIInputImageKey: clamped,
+            "inputRVector": rVector,
+            "inputGVector": gVector,
+            "inputBVector": bVector,
+            "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+            "inputBiasVector": biasVector
+        ])?.outputImage ?? clamped
     }
 }
