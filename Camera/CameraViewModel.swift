@@ -2,6 +2,7 @@ import SwiftUI
 import AVFoundation
 import Combine
 import Photos
+import UIKit
 
 final class CameraViewModel: NSObject, ObservableObject {
     @Published var authorizationStatus: AVAuthorizationStatus = AVCaptureDevice.authorizationStatus(for: .video)
@@ -136,12 +137,17 @@ final class CameraViewModel: NSObject, ObservableObject {
                 return
             }
 
+            var placeholderIdentifier: String?
             PHPhotoLibrary.shared().performChanges({
                 let request = PHAssetChangeRequest.creationRequestForAsset(from: image)
                 request.creationDate = Date()
+                if let placeholder = request.placeholderForCreatedAsset {
+                    placeholderIdentifier = placeholder.localIdentifier
+                }
             }, completionHandler: { success, error in
                 DispatchQueue.main.async {
                     if success {
+                        self.lastSavedAssetLocalIdentifier = placeholderIdentifier
                         self.savingMessage = nil
                     } else if let error = error {
                         self.savingMessage = "Failed to save photo: \(error.localizedDescription)"
@@ -151,6 +157,25 @@ final class CameraViewModel: NSObject, ObservableObject {
                     }
                 }
             })
+        }
+    }
+
+    func openLastSavedPhoto() {
+        func openURL(_ url: URL) {
+            DispatchQueue.main.async {
+                UIApplication.shared.open(url, options: [:], completionHandler: nil)
+            }
+        }
+
+        if let identifier = lastSavedAssetLocalIdentifier,
+           let assetURL = URL(string: "photos-redirect://?assetIdentifier=\(identifier)"),
+           UIApplication.shared.canOpenURL(assetURL) {
+            openURL(assetURL)
+            return
+        }
+
+        if let fallbackURL = URL(string: "photos-redirect://"), UIApplication.shared.canOpenURL(fallbackURL) {
+            openURL(fallbackURL)
         }
     }
 }
