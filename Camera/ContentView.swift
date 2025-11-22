@@ -35,13 +35,17 @@ struct ContentView: View {
                 Spacer()
                 HStack(alignment: .center) {
                     if let image = cameraViewModel.lastCapturedImage {
-                        Image(uiImage: image)
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                            .frame(width: 80, height: 80)
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.8), lineWidth: 2))
-                            .padding(.leading, 24)
+                        Button(action: {
+                            cameraViewModel.openLastSavedPhoto()
+                        }) {
+                            Image(uiImage: image)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(width: 80, height: 80)
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.8), lineWidth: 2))
+                                .padding(.leading, 24)
+                        }
                     } else {
                         Spacer().frame(width: 104)
                     }
