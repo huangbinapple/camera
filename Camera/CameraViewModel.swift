@@ -23,6 +23,8 @@ final class CameraViewModel: NSObject, ObservableObject {
     @Published var minZoomFactor: CGFloat = 1.0
     @Published var maxZoomFactor: CGFloat = 3.0
 
+    var isFrontCamera: Bool { currentCameraPosition == .front }
+
     let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "camera.session.queue")
     private let photoOutput = AVCapturePhotoOutput()
@@ -145,6 +147,7 @@ final class CameraViewModel: NSObject, ObservableObject {
                 DispatchQueue.main.async {
                     self.currentCameraPosition = newPosition
                     self.currentZoomFactor = self.minZoomFactor
+                    self.currentPreviewImage = nil
                 }
             } catch {
                 print("Failed to switch camera: \(error)")
@@ -381,16 +384,16 @@ enum CameraMode: String, CaseIterable {
 
 extension CameraViewModel: AVCapturePhotoCaptureDelegate {
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
-        guard error == nil, let data = photo.fileDataRepresentation(), let image = UIImage(data: data) else { return }
+        guard error == nil, let data = photo.fileDataRepresentation(), let cgImage = UIImage(data: data)?.cgImage else { return }
         let selectedLUT = self.selectedLUT
-        DispatchQueue.global(qos: .userInitiated).async {
-            let processedImage: UIImage
 
-            if let lut = selectedLUT, let filtered = self.applyLUT(to: image, lut: lut) {
-                processedImage = filtered
-            } else {
-                processedImage = image
-            }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let inputImage = CIImage(cgImage: cgImage)
+            let lutAppliedImage = selectedLUT.flatMap { self.applyLUT(to: inputImage, lut: $0) } ?? inputImage
+            let finalCIImage = self.mirroredIfNeeded(lutAppliedImage)
+
+            guard let outputCGImage = self.ciContext.createCGImage(finalCIImage, from: finalCIImage.extent) else { return }
+            let processedImage = UIImage(cgImage: outputCGImage, scale: UIScreen.main.scale, orientation: .up)
 
             DispatchQueue.main.async {
                 self.lastCapturedImage = processedImage
@@ -413,7 +416,9 @@ extension CameraViewModel: AVCaptureVideoDataOutputSampleBufferDelegate {
             processedImage = ciImage
         }
 
-        guard let cgImage = ciContext.createCGImage(processedImage, from: processedImage.extent) else {
+        let mirroredImage = mirroredIfNeeded(processedImage)
+
+        guard let cgImage = ciContext.createCGImage(mirroredImage, from: mirroredImage.extent) else {
             print("Failed to create CGImage for preview frame")
             return
         }
@@ -442,11 +447,11 @@ private extension CameraViewModel {
         let orientation = videoOrientation
         if let connection = videoOutput.connection(with: .video), connection.isVideoOrientationSupported {
             connection.videoOrientation = orientation
-            connection.isVideoMirrored = currentCameraPosition == .front
+            connection.isVideoMirrored = false
         }
         if let connection = photoOutput.connection(with: .video), connection.isVideoOrientationSupported {
             connection.videoOrientation = orientation
-            connection.isVideoMirrored = currentCameraPosition == .front
+            connection.isVideoMirrored = false
         }
     }
 
@@ -554,5 +559,11 @@ private extension CameraViewModel {
             return nil
         }
         return output
+    }
+
+    func mirroredIfNeeded(_ image: CIImage) -> CIImage {
+        guard isFrontCamera else { return image }
+        let transform = CGAffineTransform(scaleX: -1, y: 1).translatedBy(x: -image.extent.width, y: 0)
+        return image.transformed(by: transform)
     }
 }

@@ -30,11 +30,6 @@ struct ContentView: View {
         .onDisappear {
             cameraViewModel.stopSession()
         }
-        .sheet(isPresented: $showDocumentPicker) {
-            CubeDocumentPicker { url in
-                cameraViewModel.importLUT(from: url)
-            }
-        }
     }
 
     private var authorizedView: some View {
@@ -511,6 +506,11 @@ struct OptionsSheetView: View {
                         dismiss()
                     }
                 }
+            }
+        }
+        .sheet(isPresented: $showDocumentPicker) {
+            CubeDocumentPicker { url in
+                viewModel.importLUT(from: url)
             }
         }
     }
