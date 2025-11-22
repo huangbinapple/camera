@@ -558,11 +558,10 @@ private extension CameraViewModel {
             var g = values[i + 1]
             var b = values[i + 2]
             var a: Float = 1.0
-
-            // 🔥 关键：把 R / B 互换写入，让 LUT 体按 BGR 排布
-            withUnsafeBytes(of: &b) { cubeData.append(contentsOf: $0) } // B
-            withUnsafeBytes(of: &g) { cubeData.append(contentsOf: $0) } // G
+            
             withUnsafeBytes(of: &r) { cubeData.append(contentsOf: $0) } // R
+            withUnsafeBytes(of: &g) { cubeData.append(contentsOf: $0) } // G
+            withUnsafeBytes(of: &b) { cubeData.append(contentsOf: $0) } // B
             withUnsafeBytes(of: &a) { cubeData.append(contentsOf: $0) } // A
         }
 
