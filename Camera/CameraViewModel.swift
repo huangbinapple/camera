@@ -16,6 +16,12 @@ final class CameraViewModel: NSObject, ObservableObject {
     @Published var selectedLUT: LUTFilter?
     @Published var lutStatusMessage: String?
     @Published var previewAspectRatio: CGFloat = 3.0 / 4.0
+    @Published var flashMode: FlashMode = .auto
+    @Published var currentCameraPosition: AVCaptureDevice.Position = .back
+    @Published var currentMode: CameraMode = .photo
+    @Published var currentZoomFactor: CGFloat = 1.0
+    @Published var minZoomFactor: CGFloat = 1.0
+    @Published var maxZoomFactor: CGFloat = 3.0
 
     let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "camera.session.queue")
@@ -25,6 +31,7 @@ final class CameraViewModel: NSObject, ObservableObject {
     private let ciContext = CIContext()
     private var isSessionConfigured = false
     private let videoOrientation: AVCaptureVideoOrientation = .portrait
+    private var videoDevice: AVCaptureDevice?
 
     override init() {
         super.init()
@@ -46,6 +53,11 @@ final class CameraViewModel: NSObject, ObservableObject {
         @unknown default:
             stopSession()
         }
+    }
+
+    var zoomPresets: [CGFloat] {
+        let presets: [CGFloat] = [0.5, 1.0, 2.0, 3.0]
+        return presets.filter { $0 >= minZoomFactor && $0 <= maxZoomFactor + 0.01 }
     }
 
     private func requestAccess() {
@@ -95,6 +107,95 @@ final class CameraViewModel: NSObject, ObservableObject {
         }
     }
 
+    func cycleFlashMode() {
+        DispatchQueue.main.async {
+            self.flashMode = self.flashMode.next
+        }
+    }
+
+    func switchCamera() {
+        sessionQueue.async {
+            let newPosition: AVCaptureDevice.Position = self.currentCameraPosition == .back ? .front : .back
+            guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: newPosition) else {
+                return
+            }
+
+            do {
+                let newInput = try AVCaptureDeviceInput(device: device)
+                self.session.beginConfiguration()
+                self.session.inputs.forEach { input in
+                    self.session.removeInput(input)
+                }
+                if self.session.canAddInput(newInput) {
+                    self.session.addInput(newInput)
+                }
+                if !self.session.outputs.contains(self.photoOutput), self.session.canAddOutput(self.photoOutput) {
+                    self.session.addOutput(self.photoOutput)
+                }
+                if !self.session.outputs.contains(self.videoOutput), self.session.canAddOutput(self.videoOutput) {
+                    self.session.addOutput(self.videoOutput)
+                    self.videoOutput.setSampleBufferDelegate(self, queue: self.videoOutputQueue)
+                }
+                self.updateConnectionsOrientation()
+                self.session.commitConfiguration()
+
+                self.videoDevice = device
+                self.updateZoomLimits(for: device)
+                self.updatePreviewAspectRatio(for: device)
+                DispatchQueue.main.async {
+                    self.currentCameraPosition = newPosition
+                    self.currentZoomFactor = self.minZoomFactor
+                }
+            } catch {
+                print("Failed to switch camera: \(error)")
+            }
+        }
+    }
+
+    func setZoomFactor(_ factor: CGFloat) {
+        let clamped = max(minZoomFactor, min(factor, maxZoomFactor))
+        sessionQueue.async {
+            guard let device = self.videoDevice else { return }
+            do {
+                try device.lockForConfiguration()
+                device.videoZoomFactor = clamped
+                device.unlockForConfiguration()
+                DispatchQueue.main.async {
+                    self.currentZoomFactor = clamped
+                }
+            } catch {
+                print("Failed to set zoom: \(error)")
+            }
+        }
+    }
+
+    func focus(at normalizedPoint: CGPoint) {
+        sessionQueue.async {
+            guard let device = self.videoDevice else { return }
+            let focusPoint = normalizedPoint
+            do {
+                try device.lockForConfiguration()
+                if device.isFocusPointOfInterestSupported {
+                    device.focusPointOfInterest = focusPoint
+                    device.focusMode = .autoFocus
+                }
+                if device.isExposurePointOfInterestSupported {
+                    device.exposurePointOfInterest = focusPoint
+                    device.exposureMode = .continuousAutoExposure
+                }
+                device.unlockForConfiguration()
+            } catch {
+                print("Failed to focus: \(error)")
+            }
+        }
+    }
+
+    func setMode(_ mode: CameraMode) {
+        DispatchQueue.main.async {
+            self.currentMode = mode
+        }
+    }
+
     func stopSession() {
         sessionQueue.async {
             if self.session.isRunning {
@@ -112,10 +213,12 @@ final class CameraViewModel: NSObject, ObservableObject {
             session.removeInput(input)
         }
 
-        guard let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
+        guard let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: currentCameraPosition) else {
             session.commitConfiguration()
             return
         }
+
+        self.videoDevice = videoDevice
 
         do {
             let videoInput = try AVCaptureDeviceInput(device: videoDevice)
@@ -145,24 +248,23 @@ final class CameraViewModel: NSObject, ObservableObject {
             }
         }
 
+        updateConnectionsOrientation()
+
         session.commitConfiguration()
         isSessionConfigured = true
 
-        let formatDescription = videoDevice.activeFormat.formatDescription
-        let dimensions = CMVideoFormatDescriptionGetDimensions(formatDescription)
-        let aspect = videoOrientation == .portrait || videoOrientation == .portraitUpsideDown
-            ? CGFloat(dimensions.height) / CGFloat(dimensions.width)
-            : CGFloat(dimensions.width) / CGFloat(dimensions.height)
-        DispatchQueue.main.async {
-            self.previewAspectRatio = aspect
-        }
+        updateZoomLimits(for: videoDevice)
+        updatePreviewAspectRatio(for: videoDevice)
     }
 
     func capturePhoto() {
         guard authorizationStatus == .authorized, isSessionConfigured else { return }
         let settings = AVCapturePhotoSettings()
         settings.isHighResolutionPhotoEnabled = photoOutput.isHighResolutionCaptureEnabled
-        if photoOutput.supportedFlashModes.contains(.off) {
+        let desiredFlashMode = flashMode.asAVCaptureFlashMode
+        if photoOutput.supportedFlashModes.contains(desiredFlashMode) {
+            settings.flashMode = desiredFlashMode
+        } else if photoOutput.supportedFlashModes.contains(.off) {
             settings.flashMode = .off
         }
         if let connection = photoOutput.connection(with: .video), connection.isVideoOrientationSupported {
@@ -239,6 +341,44 @@ final class CameraViewModel: NSObject, ObservableObject {
     }
 }
 
+enum FlashMode: CaseIterable {
+    case auto
+    case on
+    case off
+
+    var displaySymbol: String {
+        switch self {
+        case .auto: return "A"
+        case .on: return "On"
+        case .off: return "Off"
+        }
+    }
+
+    var next: FlashMode {
+        switch self {
+        case .auto: return .on
+        case .on: return .off
+        case .off: return .auto
+        }
+    }
+
+    var asAVCaptureFlashMode: AVCaptureDevice.FlashMode {
+        switch self {
+        case .auto: return .auto
+        case .on: return .on
+        case .off: return .off
+        }
+    }
+}
+
+enum CameraMode: String, CaseIterable {
+    case video = "视频"
+    case photo = "照片"
+    case portrait = "人像"
+
+    var displayName: String { rawValue }
+}
+
 extension CameraViewModel: AVCapturePhotoCaptureDelegate {
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
         guard error == nil, let data = photo.fileDataRepresentation(), let image = UIImage(data: data) else { return }
@@ -286,6 +426,41 @@ extension CameraViewModel: AVCaptureVideoDataOutputSampleBufferDelegate {
 }
 
 private extension CameraViewModel {
+    func updateZoomLimits(for device: AVCaptureDevice) {
+        let minZoom = max(0.5, device.minAvailableVideoZoomFactor)
+        let maxZoom = min(device.maxAvailableVideoZoomFactor, 6.0)
+        let clamped = max(minZoom, min(currentZoomFactor, maxZoom))
+        DispatchQueue.main.async {
+            self.minZoomFactor = minZoom
+            self.maxZoomFactor = maxZoom
+            self.currentZoomFactor = clamped
+        }
+        setZoomFactor(clamped)
+    }
+
+    func updateConnectionsOrientation() {
+        let orientation = videoOrientation
+        if let connection = videoOutput.connection(with: .video), connection.isVideoOrientationSupported {
+            connection.videoOrientation = orientation
+            connection.isVideoMirrored = currentCameraPosition == .front
+        }
+        if let connection = photoOutput.connection(with: .video), connection.isVideoOrientationSupported {
+            connection.videoOrientation = orientation
+            connection.isVideoMirrored = currentCameraPosition == .front
+        }
+    }
+
+    func updatePreviewAspectRatio(for device: AVCaptureDevice) {
+        let formatDescription = device.activeFormat.formatDescription
+        let dimensions = CMVideoFormatDescriptionGetDimensions(formatDescription)
+        let aspect = videoOrientation == .portrait || videoOrientation == .portraitUpsideDown
+            ? CGFloat(dimensions.height) / CGFloat(dimensions.width)
+            : CGFloat(dimensions.width) / CGFloat(dimensions.height)
+        DispatchQueue.main.async {
+            self.previewAspectRatio = aspect
+        }
+    }
+
     enum LUTParserError: LocalizedError {
         case invalidFormat
         case missingSize
