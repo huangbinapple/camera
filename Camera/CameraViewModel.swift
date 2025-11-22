@@ -136,16 +136,13 @@ final class CameraViewModel: NSObject, ObservableObject {
                 return
             }
 
-            var placeholderIdentifier: String?
             PHPhotoLibrary.shared().performChanges({
                 let request = PHAssetChangeRequest.creationRequestForAsset(from: image)
                 request.creationDate = Date()
-                placeholderIdentifier = request.placeholderForCreatedAsset?.localIdentifier
             }, completionHandler: { success, error in
                 DispatchQueue.main.async {
                     if success {
                         self.savingMessage = nil
-                        self.lastSavedAssetLocalIdentifier = placeholderIdentifier
                     } else if let error = error {
                         self.savingMessage = "Failed to save photo: \(error.localizedDescription)"
                         print("Photo save error: \(error)")
@@ -155,14 +152,6 @@ final class CameraViewModel: NSObject, ObservableObject {
                 }
             })
         }
-    }
-
-    func photosDeepLinkURLs() -> (asset: URL?, fallback: URL?) {
-        let assetURL: URL? = lastSavedAssetLocalIdentifier.flatMap { identifier in
-            URL(string: "photos-redirect://\(identifier)")
-        }
-        let fallbackURL = URL(string: "photos-redirect://")
-        return (assetURL, fallbackURL)
     }
 }
 

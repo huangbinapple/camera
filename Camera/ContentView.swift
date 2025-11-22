@@ -34,16 +34,13 @@ struct ContentView: View {
                 Spacer()
                 HStack(alignment: .center) {
                     if let image = cameraViewModel.lastCapturedImage {
-                        Button(action: openLastSavedPhoto) {
-                            Image(uiImage: image)
-                                .resizable()
-                                .aspectRatio(contentMode: .fill)
-                                .frame(width: 80, height: 80)
-                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.8), lineWidth: 2))
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.leading, 24)
+                        Image(uiImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: 80, height: 80)
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.8), lineWidth: 2))
+                            .padding(.leading, 24)
                     } else {
                         Spacer().frame(width: 104)
                     }
@@ -158,19 +155,6 @@ struct ContentView: View {
     private func openSettings() {
         guard let settingsURL = URL(string: UIApplication.openSettingsURLString), UIApplication.shared.canOpenURL(settingsURL) else { return }
         UIApplication.shared.open(settingsURL)
-    }
-
-    private func openLastSavedPhoto() {
-        guard cameraViewModel.lastCapturedImage != nil else { return }
-        let urls = cameraViewModel.photosDeepLinkURLs()
-        DispatchQueue.main.async {
-            let application = UIApplication.shared
-            if let assetURL = urls.asset, application.canOpenURL(assetURL) {
-                application.open(assetURL)
-            } else if let fallbackURL = urls.fallback, application.canOpenURL(fallbackURL) {
-                application.open(fallbackURL)
-            }
-        }
     }
 }
 
