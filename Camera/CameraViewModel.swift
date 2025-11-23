@@ -4,6 +4,7 @@ import Combine
 import Photos
 import UIKit
 import CoreImage
+import ImageIO
 import simd
 
 final class CameraViewModel: NSObject, ObservableObject {
@@ -129,9 +130,10 @@ final class CameraViewModel: NSObject, ObservableObject {
             do {
                 let newInput = try AVCaptureDeviceInput(device: device)
                 self.session.beginConfiguration()
-                self.session.inputs.forEach { input in
-                    self.session.removeInput(input)
-                }
+                self.session.inputs
+                    .compactMap { $0 as? AVCaptureDeviceInput }
+                    .filter { $0.device.hasMediaType(.video) }
+                    .forEach { self.session.removeInput($0) }
                 if self.session.canAddInput(newInput) {
                     self.session.addInput(newInput)
                 }
@@ -215,10 +217,11 @@ final class CameraViewModel: NSObject, ObservableObject {
         session.beginConfiguration()
         session.sessionPreset = .photo
 
-        // Remove existing inputs
-        session.inputs.forEach { input in
-            session.removeInput(input)
-        }
+        // Remove existing video inputs
+        session.inputs
+            .compactMap { $0 as? AVCaptureDeviceInput }
+            .filter { $0.device.hasMediaType(.video) }
+            .forEach { session.removeInput($0) }
 
         guard let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: currentCameraPosition) else {
             session.commitConfiguration()
@@ -237,7 +240,7 @@ final class CameraViewModel: NSObject, ObservableObject {
             return
         }
 
-        if session.canAddOutput(photoOutput) {
+        if !session.outputs.contains(photoOutput), session.canAddOutput(photoOutput) {
             session.addOutput(photoOutput)
             photoOutput.isHighResolutionCaptureEnabled = true
         }
@@ -245,14 +248,9 @@ final class CameraViewModel: NSObject, ObservableObject {
         videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
         videoOutput.alwaysDiscardsLateVideoFrames = true
 
-        if session.canAddOutput(videoOutput) {
+        if !session.outputs.contains(videoOutput), session.canAddOutput(videoOutput) {
             session.addOutput(videoOutput)
             videoOutput.setSampleBufferDelegate(self, queue: videoOutputQueue)
-            videoOutput.connections.forEach { connection in
-                if connection.isVideoOrientationSupported {
-                    connection.videoOrientation = videoOrientation
-                }
-            }
         }
 
         updateConnectionsOrientation()
@@ -276,6 +274,7 @@ final class CameraViewModel: NSObject, ObservableObject {
         }
         if let connection = photoOutput.connection(with: .video), connection.isVideoOrientationSupported {
             connection.videoOrientation = videoOrientation
+            connection.isVideoMirrored = false
         }
         photoOutput.capturePhoto(with: settings, delegate: self)
     }
@@ -390,8 +389,16 @@ extension CameraViewModel: AVCapturePhotoCaptureDelegate {
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
         guard error == nil, let data = photo.fileDataRepresentation(), let cgImage = UIImage(data: data)?.cgImage else { return }
 
+        let exifOrientation: CGImagePropertyOrientation
+        if let rawOrientation = photo.metadata[kCGImagePropertyOrientation as String] as? UInt32,
+           let mapped = CGImagePropertyOrientation(rawValue: rawOrientation) {
+            exifOrientation = mapped
+        } else {
+            exifOrientation = .right
+        }
+
         DispatchQueue.global(qos: .userInitiated).async {
-            let inputImage = CIImage(cgImage: cgImage)
+            let inputImage = CIImage(cgImage: cgImage).oriented(exifOrientation)
             let lutAppliedImage = self.applyLUTPipeline(to: inputImage)
             let finalCIImage = self.mirroredIfNeeded(lutAppliedImage)
 
@@ -410,7 +417,7 @@ extension CameraViewModel: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
-        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer).oriented(self.videoOrientation.ciImageOrientation)
         let lutApplied = applyLUTPipeline(to: ciImage)
         let mirroredImage = mirroredIfNeeded(lutApplied)
 
@@ -608,12 +615,18 @@ private extension CameraViewModel {
 
         var workingImage = ciImage
 
-        if let baseLUT = srgbToFLogLUT, let baseApplied = applyLUT(to: workingImage, lut: baseLUT) {
-            workingImage = baseApplied
+        if let baseLUT = srgbToFLogLUT {
+            if let baseApplied = applyLUT(to: workingImage, lut: baseLUT) {
+                workingImage = baseApplied
+            } else {
+                print("Failed to apply base LUT; continuing with original image")
+            }
         }
 
         if let creativeApplied = applyLUT(to: workingImage, lut: creativeLUT) {
             workingImage = creativeApplied
+        } else {
+            print("Failed to apply creative LUT")
         }
 
         return workingImage
@@ -649,6 +662,18 @@ private extension CameraViewModel {
     func loadInternalLUTs() {
         if let url = Bundle.main.url(forResource: "srgb_to_flog2c_33", withExtension: "cube") {
             srgbToFLogLUT = try? parseCubeLUT(from: url)
+        }
+    }
+}
+
+private extension AVCaptureVideoOrientation {
+    var ciImageOrientation: CGImagePropertyOrientation {
+        switch self {
+        case .portrait: return .right
+        case .portraitUpsideDown: return .left
+        case .landscapeRight: return .down
+        case .landscapeLeft: return .up
+        @unknown default: return .right
         }
     }
 }
