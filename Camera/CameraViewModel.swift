@@ -23,6 +23,7 @@ final class CameraViewModel: NSObject, ObservableObject {
     @Published var currentZoomFactor: CGFloat = 1.0
     @Published var minZoomFactor: CGFloat = 1.0
     @Published var maxZoomFactor: CGFloat = 3.0
+    @Published var captureOrientation: AVCaptureVideoOrientation = .portrait
 
     var isFrontCamera: Bool { currentCameraPosition == .front }
 
@@ -34,28 +35,23 @@ final class CameraViewModel: NSObject, ObservableObject {
     private let ciContext = CIContext()
     private var srgbToFLogLUT: LUTFilter?
     private var isSessionConfigured = false
-    private var videoOrientation: AVCaptureVideoOrientation = .portrait
     private var videoDevice: AVCaptureDevice?
-    private var orientationObserver: NSObjectProtocol?
 
     override init() {
         super.init()
         loadInternalLUTs()
         UIDevice.current.beginGeneratingDeviceOrientationNotifications()
-        orientationObserver = NotificationCenter.default.addObserver(
-            forName: UIDevice.orientationDidChangeNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.handleDeviceOrientationChange()
-        }
-        videoOrientation = resolvedVideoOrientation(from: UIDevice.current.orientation)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(deviceOrientationDidChange),
+            name: UIDevice.orientationDidChangeNotification,
+            object: nil
+        )
+        captureOrientation = UIDevice.current.orientation.toVideoOrientation ?? .portrait
     }
 
     deinit {
-        if let observer = orientationObserver {
-            NotificationCenter.default.removeObserver(observer)
-        }
+        NotificationCenter.default.removeObserver(self)
         UIDevice.current.endGeneratingDeviceOrientationNotifications()
     }
 
@@ -229,7 +225,7 @@ final class CameraViewModel: NSObject, ObservableObject {
     }
 
     private func configureSession() {
-        videoOrientation = resolvedVideoOrientation(from: UIDevice.current.orientation)
+        captureOrientation = UIDevice.current.orientation.toVideoOrientation ?? .portrait
 
         session.beginConfiguration()
         session.sessionPreset = .photo
@@ -269,7 +265,7 @@ final class CameraViewModel: NSObject, ObservableObject {
             videoOutput.setSampleBufferDelegate(self, queue: videoOutputQueue)
             videoOutput.connections.forEach { connection in
                 if connection.isVideoOrientationSupported {
-                    connection.videoOrientation = videoOrientation
+                    connection.videoOrientation = captureOrientation
                 }
             }
         }
@@ -294,7 +290,8 @@ final class CameraViewModel: NSObject, ObservableObject {
             settings.flashMode = .off
         }
         if let connection = photoOutput.connection(with: .video), connection.isVideoOrientationSupported {
-            connection.videoOrientation = videoOrientation
+            connection.videoOrientation = captureOrientation
+            connection.isVideoMirrored = isFrontCamera
         }
         photoOutput.capturePhoto(with: settings, delegate: self)
     }
@@ -409,21 +406,32 @@ extension CameraViewModel: AVCapturePhotoCaptureDelegate {
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
         guard error == nil,
               let data = photo.fileDataRepresentation(),
-              let originalUIImage = UIImage(data: data) else { return }
+              let originalUIImage = UIImage(data: data),
+              let baseCIImage = CIImage(image: originalUIImage) else { return }
 
-        let normalizedUIImage = originalUIImage.normalizedToUp()
-
-        guard var ciImage = CIImage(image: normalizedUIImage) else { return }
+        let orientation = captureOrientation
 
         DispatchQueue.global(qos: .userInitiated).async {
-            ciImage = self.applyLUTPipeline(to: ciImage)
+            var ciImage = self.applyLUTPipeline(to: baseCIImage)
             ciImage = self.mirroredIfNeeded(ciImage)
-            ciImage = ciImage.oriented(.up)
+
+            switch orientation {
+            case .portrait:
+                ciImage = ciImage.oriented(.up)
+            case .portraitUpsideDown:
+                ciImage = ciImage.oriented(.down)
+            case .landscapeLeft:
+                ciImage = ciImage.oriented(.left)
+            case .landscapeRight:
+                ciImage = ciImage.oriented(.right)
+            @unknown default:
+                ciImage = ciImage.oriented(.up)
+            }
 
             guard let outputCGImage = self.ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
             let processedImage = UIImage(
                 cgImage: outputCGImage,
-                scale: normalizedUIImage.scale,
+                scale: UIScreen.main.scale,
                 orientation: .up
             )
 
@@ -455,25 +463,14 @@ extension CameraViewModel: AVCaptureVideoDataOutputSampleBufferDelegate {
     }
 }
 
-private extension UIImage {
-    func normalizedToUp() -> UIImage {
-        guard imageOrientation != .up else { return self }
-
-        let format = UIGraphicsImageRendererFormat.default()
-        format.scale = scale
-
-        let renderer = UIGraphicsImageRenderer(size: size, format: format)
-        return renderer.image { _ in
-            self.draw(in: CGRect(origin: .zero, size: size))
-        }
-    }
-}
-
 private extension CameraViewModel {
-    @objc func handleDeviceOrientationChange() {
-        let newOrientation = resolvedVideoOrientation(from: UIDevice.current.orientation)
-        guard newOrientation != videoOrientation else { return }
-        videoOrientation = newOrientation
+    @objc func deviceOrientationDidChange() {
+        let deviceOrientation = UIDevice.current.orientation
+        guard let newOrientation = deviceOrientation.toVideoOrientation else { return }
+
+        DispatchQueue.main.async {
+            self.captureOrientation = newOrientation
+        }
 
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -481,19 +478,6 @@ private extension CameraViewModel {
             if let device = self.videoDevice {
                 self.updatePreviewAspectRatio(for: device)
             }
-        }
-    }
-
-    func resolvedVideoOrientation(from deviceOrientation: UIDeviceOrientation) -> AVCaptureVideoOrientation {
-        switch deviceOrientation {
-        case .landscapeLeft:
-            return .landscapeRight
-        case .landscapeRight:
-            return .landscapeLeft
-        case .portraitUpsideDown:
-            return .portraitUpsideDown
-        default:
-            return .portrait
         }
     }
 
@@ -510,21 +494,21 @@ private extension CameraViewModel {
     }
 
     func updateConnectionsOrientation() {
-        let orientation = videoOrientation
+        let orientation = captureOrientation
         if let connection = videoOutput.connection(with: .video), connection.isVideoOrientationSupported {
             connection.videoOrientation = orientation
-            connection.isVideoMirrored = false
+            connection.isVideoMirrored = isFrontCamera
         }
         if let connection = photoOutput.connection(with: .video), connection.isVideoOrientationSupported {
             connection.videoOrientation = orientation
-            connection.isVideoMirrored = false
+            connection.isVideoMirrored = isFrontCamera
         }
     }
 
     func updatePreviewAspectRatio(for device: AVCaptureDevice) {
         let formatDescription = device.activeFormat.formatDescription
         let dimensions = CMVideoFormatDescriptionGetDimensions(formatDescription)
-        let aspect = videoOrientation == .portrait || videoOrientation == .portraitUpsideDown
+        let aspect = captureOrientation == .portrait || captureOrientation == .portraitUpsideDown
             ? CGFloat(dimensions.height) / CGFloat(dimensions.width)
             : CGFloat(dimensions.width) / CGFloat(dimensions.height)
         DispatchQueue.main.async {
@@ -719,6 +703,23 @@ private extension CameraViewModel {
     func loadInternalLUTs() {
         if let url = Bundle.main.url(forResource: "srgb_to_flog2c_33", withExtension: "cube") {
             srgbToFLogLUT = try? parseCubeLUT(from: url)
+        }
+    }
+}
+
+private extension UIDeviceOrientation {
+    var toVideoOrientation: AVCaptureVideoOrientation? {
+        switch self {
+        case .portrait:
+            return .portrait
+        case .portraitUpsideDown:
+            return .portraitUpsideDown
+        case .landscapeLeft:
+            return .landscapeRight
+        case .landscapeRight:
+            return .landscapeLeft
+        default:
+            return nil
         }
     }
 }
