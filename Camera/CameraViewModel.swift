@@ -34,12 +34,29 @@ final class CameraViewModel: NSObject, ObservableObject {
     private let ciContext = CIContext()
     private var srgbToFLogLUT: LUTFilter?
     private var isSessionConfigured = false
-    private let videoOrientation: AVCaptureVideoOrientation = .portrait
+    private var videoOrientation: AVCaptureVideoOrientation = .portrait
     private var videoDevice: AVCaptureDevice?
+    private var orientationObserver: NSObjectProtocol?
 
     override init() {
         super.init()
         loadInternalLUTs()
+        UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+        orientationObserver = NotificationCenter.default.addObserver(
+            forName: UIDevice.orientationDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleDeviceOrientationChange()
+        }
+        videoOrientation = resolvedVideoOrientation(from: UIDevice.current.orientation)
+    }
+
+    deinit {
+        if let observer = orientationObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        UIDevice.current.endGeneratingDeviceOrientationNotifications()
     }
 
     func checkPermissions() {
@@ -212,6 +229,8 @@ final class CameraViewModel: NSObject, ObservableObject {
     }
 
     private func configureSession() {
+        videoOrientation = resolvedVideoOrientation(from: UIDevice.current.orientation)
+
         session.beginConfiguration()
         session.sessionPreset = .photo
 
@@ -451,6 +470,33 @@ private extension UIImage {
 }
 
 private extension CameraViewModel {
+    @objc func handleDeviceOrientationChange() {
+        let newOrientation = resolvedVideoOrientation(from: UIDevice.current.orientation)
+        guard newOrientation != videoOrientation else { return }
+        videoOrientation = newOrientation
+
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.updateConnectionsOrientation()
+            if let device = self.videoDevice {
+                self.updatePreviewAspectRatio(for: device)
+            }
+        }
+    }
+
+    func resolvedVideoOrientation(from deviceOrientation: UIDeviceOrientation) -> AVCaptureVideoOrientation {
+        switch deviceOrientation {
+        case .landscapeLeft:
+            return .landscapeRight
+        case .landscapeRight:
+            return .landscapeLeft
+        case .portraitUpsideDown:
+            return .portraitUpsideDown
+        default:
+            return .portrait
+        }
+    }
+
     func updateZoomLimits(for device: AVCaptureDevice) {
         let minZoom = max(0.5, device.minAvailableVideoZoomFactor)
         let maxZoom = min(device.maxAvailableVideoZoomFactor, 6.0)
