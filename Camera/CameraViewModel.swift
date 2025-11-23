@@ -388,15 +388,21 @@ enum CameraMode: String, CaseIterable {
 
 extension CameraViewModel: AVCapturePhotoCaptureDelegate {
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
-        guard error == nil, let data = photo.fileDataRepresentation(), let cgImage = UIImage(data: data)?.cgImage else { return }
+        guard error == nil,
+              let data = photo.fileDataRepresentation(),
+              let originalUIImage = UIImage(data: data),
+              let inputCIImage = CIImage(image: originalUIImage) else { return }
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let inputImage = CIImage(cgImage: cgImage)
-            let lutAppliedImage = self.applyLUTPipeline(to: inputImage)
+            let lutAppliedImage = self.applyLUTPipeline(to: inputCIImage)
             let finalCIImage = self.mirroredIfNeeded(lutAppliedImage)
 
             guard let outputCGImage = self.ciContext.createCGImage(finalCIImage, from: finalCIImage.extent) else { return }
-            let processedImage = UIImage(cgImage: outputCGImage, scale: UIScreen.main.scale, orientation: .up)
+            let processedImage = UIImage(
+                cgImage: outputCGImage,
+                scale: originalUIImage.scale,
+                orientation: originalUIImage.imageOrientation
+            )
 
             DispatchQueue.main.async {
                 self.lastCapturedImage = processedImage
