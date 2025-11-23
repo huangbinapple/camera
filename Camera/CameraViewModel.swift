@@ -391,17 +391,18 @@ extension CameraViewModel: AVCapturePhotoCaptureDelegate {
         guard error == nil,
               let data = photo.fileDataRepresentation(),
               let originalUIImage = UIImage(data: data),
-              let inputCIImage = CIImage(image: originalUIImage) else { return }
+              var ciImage = CIImage(image: originalUIImage) else { return }
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let lutAppliedImage = self.applyLUTPipeline(to: inputCIImage)
-            let finalCIImage = self.mirroredIfNeeded(lutAppliedImage)
+            ciImage = self.applyLUTPipeline(to: ciImage)
+            ciImage = self.mirroredIfNeeded(ciImage)
+            ciImage = ciImage.oriented(.up)
 
-            guard let outputCGImage = self.ciContext.createCGImage(finalCIImage, from: finalCIImage.extent) else { return }
+            guard let outputCGImage = self.ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
             let processedImage = UIImage(
                 cgImage: outputCGImage,
-                scale: originalUIImage.scale,
-                orientation: originalUIImage.imageOrientation
+                scale: UIScreen.main.scale,
+                orientation: .up
             )
 
             DispatchQueue.main.async {
