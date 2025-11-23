@@ -647,7 +647,7 @@ private extension CameraViewModel {
     }
 
     func loadInternalLUTs() {
-        if let url = Bundle.main.url(forResource: "srgb_to_flog2_balanced", withExtension: "cube") {
+        if let url = Bundle.main.url(forResource: "srgb_to_flog2c_33", withExtension: "cube") {
             srgbToFLogLUT = try? parseCubeLUT(from: url)
         }
     }
