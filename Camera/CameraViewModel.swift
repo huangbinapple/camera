@@ -23,6 +23,7 @@ final class CameraViewModel: NSObject, ObservableObject {
     @Published var currentZoomFactor: CGFloat = 1.0
     @Published var minZoomFactor: CGFloat = 1.0
     @Published var maxZoomFactor: CGFloat = 3.0
+    @Published var currentCaptureOrientation: AVCaptureVideoOrientation = .portrait
 
     var isFrontCamera: Bool { currentCameraPosition == .front }
 
@@ -34,9 +35,9 @@ final class CameraViewModel: NSObject, ObservableObject {
     private let ciContext = CIContext()
     private var srgbToFLogLUT: LUTFilter?
     private var isSessionConfigured = false
-    private var videoOrientation: AVCaptureVideoOrientation = .portrait
     private var videoDevice: AVCaptureDevice?
     private var orientationObserver: NSObjectProtocol?
+    private var lastValidDeviceOrientation: UIDeviceOrientation = .portrait
 
     override init() {
         super.init()
@@ -49,7 +50,8 @@ final class CameraViewModel: NSObject, ObservableObject {
         ) { [weak self] _ in
             self?.handleDeviceOrientationChange()
         }
-        videoOrientation = resolvedVideoOrientation(from: UIDevice.current.orientation)
+        let initialDeviceOrientation = filteredDeviceOrientation(from: UIDevice.current.orientation)
+        currentCaptureOrientation = resolvedVideoOrientation(from: initialDeviceOrientation)
     }
 
     deinit {
@@ -229,7 +231,8 @@ final class CameraViewModel: NSObject, ObservableObject {
     }
 
     private func configureSession() {
-        videoOrientation = resolvedVideoOrientation(from: UIDevice.current.orientation)
+        let filteredOrientation = filteredDeviceOrientation(from: UIDevice.current.orientation)
+        currentCaptureOrientation = resolvedVideoOrientation(from: filteredOrientation)
 
         session.beginConfiguration()
         session.sessionPreset = .photo
@@ -269,7 +272,7 @@ final class CameraViewModel: NSObject, ObservableObject {
             videoOutput.setSampleBufferDelegate(self, queue: videoOutputQueue)
             videoOutput.connections.forEach { connection in
                 if connection.isVideoOrientationSupported {
-                    connection.videoOrientation = videoOrientation
+                    connection.videoOrientation = currentCaptureOrientation
                 }
             }
         }
@@ -294,7 +297,7 @@ final class CameraViewModel: NSObject, ObservableObject {
             settings.flashMode = .off
         }
         if let connection = photoOutput.connection(with: .video), connection.isVideoOrientationSupported {
-            connection.videoOrientation = videoOrientation
+            connection.videoOrientation = currentCaptureOrientation
         }
         photoOutput.capturePhoto(with: settings, delegate: self)
     }
@@ -408,10 +411,13 @@ enum CameraMode: String, CaseIterable {
 extension CameraViewModel: AVCapturePhotoCaptureDelegate {
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
         guard error == nil,
-              let data = photo.fileDataRepresentation(),
-              let originalUIImage = UIImage(data: data) else { return }
+              let cgImage = photo.cgImageRepresentation() else { return }
 
-        let normalizedUIImage = originalUIImage.normalizedToUp()
+        let captureOrientation = currentCaptureOrientation
+        let mirrored = isFrontCamera
+        let orientation = uiImageOrientation(from: captureOrientation, mirrored: mirrored)
+        let baseImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: orientation)
+        let normalizedUIImage = baseImage.normalizedToUp()
 
         guard var ciImage = CIImage(image: normalizedUIImage) else { return }
 
@@ -470,10 +476,26 @@ private extension UIImage {
 }
 
 private extension CameraViewModel {
+    func uiImageOrientation(from captureOrientation: AVCaptureVideoOrientation, mirrored: Bool) -> UIImage.Orientation {
+        switch captureOrientation {
+        case .portrait:
+            return mirrored ? .leftMirrored : .right
+        case .portraitUpsideDown:
+            return mirrored ? .rightMirrored : .left
+        case .landscapeLeft:
+            return mirrored ? .downMirrored : .down
+        case .landscapeRight:
+            return mirrored ? .upMirrored : .up
+        @unknown default:
+            return mirrored ? .leftMirrored : .right
+        }
+    }
+
     @objc func handleDeviceOrientationChange() {
-        let newOrientation = resolvedVideoOrientation(from: UIDevice.current.orientation)
-        guard newOrientation != videoOrientation else { return }
-        videoOrientation = newOrientation
+        let deviceOrientation = filteredDeviceOrientation(from: UIDevice.current.orientation)
+        let newOrientation = resolvedVideoOrientation(from: deviceOrientation)
+        guard newOrientation != currentCaptureOrientation else { return }
+        currentCaptureOrientation = newOrientation
 
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -497,6 +519,16 @@ private extension CameraViewModel {
         }
     }
 
+    func filteredDeviceOrientation(from deviceOrientation: UIDeviceOrientation) -> UIDeviceOrientation {
+        switch deviceOrientation {
+        case .portrait, .landscapeLeft, .landscapeRight, .portraitUpsideDown:
+            lastValidDeviceOrientation = deviceOrientation
+            return deviceOrientation
+        default:
+            return lastValidDeviceOrientation
+        }
+    }
+
     func updateZoomLimits(for device: AVCaptureDevice) {
         let minZoom = max(0.5, device.minAvailableVideoZoomFactor)
         let maxZoom = min(device.maxAvailableVideoZoomFactor, 6.0)
@@ -510,7 +542,7 @@ private extension CameraViewModel {
     }
 
     func updateConnectionsOrientation() {
-        let orientation = videoOrientation
+        let orientation = currentCaptureOrientation
         if let connection = videoOutput.connection(with: .video), connection.isVideoOrientationSupported {
             connection.videoOrientation = orientation
             connection.isVideoMirrored = false
@@ -524,7 +556,7 @@ private extension CameraViewModel {
     func updatePreviewAspectRatio(for device: AVCaptureDevice) {
         let formatDescription = device.activeFormat.formatDescription
         let dimensions = CMVideoFormatDescriptionGetDimensions(formatDescription)
-        let aspect = videoOrientation == .portrait || videoOrientation == .portraitUpsideDown
+        let aspect = currentCaptureOrientation == .portrait || currentCaptureOrientation == .portraitUpsideDown
             ? CGFloat(dimensions.height) / CGFloat(dimensions.width)
             : CGFloat(dimensions.width) / CGFloat(dimensions.height)
         DispatchQueue.main.async {
