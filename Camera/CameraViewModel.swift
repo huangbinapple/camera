@@ -34,7 +34,7 @@ final class CameraViewModel: NSObject, ObservableObject {
     private let ciContext = CIContext()
     private var srgbToFLogLUT: LUTFilter?
     private var isSessionConfigured = false
-    private let videoOrientation: AVCaptureVideoOrientation = .portrait
+    private var videoOrientation: AVCaptureVideoOrientation = .portrait
     private var videoDevice: AVCaptureDevice?
 
     override init() {
@@ -248,11 +248,6 @@ final class CameraViewModel: NSObject, ObservableObject {
         if session.canAddOutput(videoOutput) {
             session.addOutput(videoOutput)
             videoOutput.setSampleBufferDelegate(self, queue: videoOutputQueue)
-            videoOutput.connections.forEach { connection in
-                if connection.isVideoOrientationSupported {
-                    connection.videoOrientation = videoOrientation
-                }
-            }
         }
 
         updateConnectionsOrientation()
@@ -274,9 +269,7 @@ final class CameraViewModel: NSObject, ObservableObject {
         } else if photoOutput.supportedFlashModes.contains(.off) {
             settings.flashMode = .off
         }
-        if let connection = photoOutput.connection(with: .video), connection.isVideoOrientationSupported {
-            connection.videoOrientation = videoOrientation
-        }
+        updateConnectionsOrientation()
         photoOutput.capturePhoto(with: settings, delegate: self)
     }
 
@@ -388,15 +381,22 @@ enum CameraMode: String, CaseIterable {
 
 extension CameraViewModel: AVCapturePhotoCaptureDelegate {
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
-        guard error == nil, let data = photo.fileDataRepresentation(), let cgImage = UIImage(data: data)?.cgImage else { return }
+        guard error == nil,
+              let data = photo.fileDataRepresentation(),
+              let originalUIImage = UIImage(data: data),
+              var ciImage = CIImage(image: originalUIImage) else { return }
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let inputImage = CIImage(cgImage: cgImage)
-            let lutAppliedImage = self.applyLUTPipeline(to: inputImage)
-            let finalCIImage = self.mirroredIfNeeded(lutAppliedImage)
+            ciImage = self.applyLUTPipeline(to: ciImage)
+            ciImage = self.mirroredIfNeeded(ciImage)
+            ciImage = ciImage.oriented(.up)
 
-            guard let outputCGImage = self.ciContext.createCGImage(finalCIImage, from: finalCIImage.extent) else { return }
-            let processedImage = UIImage(cgImage: outputCGImage, scale: UIScreen.main.scale, orientation: .up)
+            guard let outputCGImage = self.ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
+            let processedImage = UIImage(
+                cgImage: outputCGImage,
+                scale: originalUIImage.scale,
+                orientation: .up
+            )
 
             DispatchQueue.main.async {
                 self.lastCapturedImage = processedImage
@@ -440,7 +440,8 @@ private extension CameraViewModel {
     }
 
     func updateConnectionsOrientation() {
-        let orientation = videoOrientation
+        let orientation = currentVideoOrientation()
+        videoOrientation = orientation
         if let connection = videoOutput.connection(with: .video), connection.isVideoOrientationSupported {
             connection.videoOrientation = orientation
             connection.isVideoMirrored = false
@@ -448,6 +449,24 @@ private extension CameraViewModel {
         if let connection = photoOutput.connection(with: .video), connection.isVideoOrientationSupported {
             connection.videoOrientation = orientation
             connection.isVideoMirrored = false
+        }
+        if let device = videoDevice {
+            updatePreviewAspectRatio(for: device)
+        }
+    }
+
+    func currentVideoOrientation() -> AVCaptureVideoOrientation {
+        switch UIDevice.current.orientation {
+        case .landscapeLeft:
+            return .landscapeRight
+        case .landscapeRight:
+            return .landscapeLeft
+        case .portraitUpsideDown:
+            return .portraitUpsideDown
+        case .portrait:
+            fallthrough
+        default:
+            return .portrait
         }
     }
 
