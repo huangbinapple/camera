@@ -390,8 +390,11 @@ extension CameraViewModel: AVCapturePhotoCaptureDelegate {
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
         guard error == nil,
               let data = photo.fileDataRepresentation(),
-              let originalUIImage = UIImage(data: data),
-              var ciImage = CIImage(image: originalUIImage) else { return }
+              let originalUIImage = UIImage(data: data) else { return }
+
+        let normalizedUIImage = originalUIImage.normalizedToUp()
+
+        guard var ciImage = CIImage(image: normalizedUIImage) else { return }
 
         DispatchQueue.global(qos: .userInitiated).async {
             ciImage = self.applyLUTPipeline(to: ciImage)
@@ -401,7 +404,7 @@ extension CameraViewModel: AVCapturePhotoCaptureDelegate {
             guard let outputCGImage = self.ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
             let processedImage = UIImage(
                 cgImage: outputCGImage,
-                scale: UIScreen.main.scale,
+                scale: normalizedUIImage.scale,
                 orientation: .up
             )
 
@@ -429,6 +432,20 @@ extension CameraViewModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         let uiImage = UIImage(cgImage: cgImage)
         DispatchQueue.main.async {
             self.currentPreviewImage = uiImage
+        }
+    }
+}
+
+private extension UIImage {
+    func normalizedToUp() -> UIImage {
+        guard imageOrientation != .up else { return self }
+
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = scale
+
+        let renderer = UIGraphicsImageRenderer(size: size, format: format)
+        return renderer.image { _ in
+            self.draw(in: CGRect(origin: .zero, size: size))
         }
     }
 }
