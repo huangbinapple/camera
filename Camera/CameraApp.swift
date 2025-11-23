@@ -13,6 +13,10 @@ class PortraitHostingController<Content: View>: UIHostingController<Content> {
         .portrait
     }
 
+    override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation {
+        .portrait
+    }
+
     override var shouldAutorotate: Bool {
         false
     }
